@@ -706,7 +706,8 @@ fn materialize_runtime_entry(
         "configPath": config_path.to_string_lossy(),
         "zeroclawConfigPath": zeroclaw_config_path.to_string_lossy(),
         "telegramTopicsPath": runtime_dir.join("telegram-topics.json").to_string_lossy(),
-        "usageEventsPath": runtime_dir.join("provider-usage.jsonl").to_string_lossy(),
+        "usageEventsPath": runtime_dir.join("state").join("costs.jsonl").to_string_lossy(),
+        "legacyUsageEventsPath": runtime_dir.join("provider-usage.jsonl").to_string_lossy(),
         "gatewayPort": gateway_port,
         "telegramBotUsername": null,
         "telegramTokenFingerprint": telegram_token_fingerprint(entry),
@@ -1452,6 +1453,31 @@ fn parse_iso_datetime(value: Option<&str>) -> Option<DateTime<Utc>> {
     })
 }
 
+fn u64_field_any(value: &Value, keys: &[&str]) -> Option<u64> {
+    keys.iter().find_map(|key| {
+        let raw = value.get(*key)?;
+        raw.as_u64()
+            .or_else(|| raw.as_i64().and_then(|number| u64::try_from(number).ok()))
+            .or_else(|| {
+                raw.as_f64()
+                    .filter(|number| number.is_finite() && *number >= 0.0)
+                    .map(|number| number as u64)
+            })
+            .or_else(|| raw.as_str().and_then(|text| text.trim().parse::<u64>().ok()))
+    })
+}
+
+fn f64_field_any(value: &Value, keys: &[&str]) -> Option<f64> {
+    keys.iter().find_map(|key| {
+        let raw = value.get(*key)?;
+        raw.as_f64()
+            .or_else(|| raw.as_i64().map(|number| number as f64))
+            .or_else(|| raw.as_u64().map(|number| number as f64))
+            .or_else(|| raw.as_str().and_then(|text| text.trim().parse::<f64>().ok()))
+            .filter(|number| number.is_finite() && *number >= 0.0)
+    })
+}
+
 fn usage_event_in_range(
     event: &Value,
     start: Option<&DateTime<Utc>>,
@@ -1472,8 +1498,155 @@ fn usage_event_in_range(
     true
 }
 
+fn normalized_usage_event(record: &Value, runtime: Option<&Value>) -> Option<Value> {
+    let usage = record
+        .get("usage")
+        .filter(|value| value.is_object())
+        .unwrap_or(record);
+    let recorded_at = string_field(record, "recordedAt")
+        .or_else(|| string_field(record, "recorded_at"))
+        .or_else(|| string_field(record, "timestamp"))
+        .or_else(|| string_field(usage, "timestamp"))?;
+    let provider = string_field(record, "provider")
+        .or_else(|| string_field(record, "modelProvider"))
+        .or_else(|| string_field(record, "model_provider"))
+        .or_else(|| runtime.and_then(|runtime| string_field(runtime, "provider")))?;
+    let model = string_field(record, "model")
+        .or_else(|| string_field(record, "modelId"))
+        .or_else(|| string_field(record, "model_id"))
+        .or_else(|| string_field(usage, "model"))
+        .unwrap_or_default();
+    let prompt_tokens = u64_field_any(
+        record,
+        &["promptTokens", "prompt_tokens", "inputTokens", "input_tokens"],
+    )
+    .or_else(|| {
+        u64_field_any(
+            usage,
+            &["promptTokens", "prompt_tokens", "inputTokens", "input_tokens"],
+        )
+    })
+    .unwrap_or(0);
+    let completion_tokens = u64_field_any(
+        record,
+        &["completionTokens", "completion_tokens", "outputTokens", "output_tokens"],
+    )
+    .or_else(|| {
+        u64_field_any(
+            usage,
+            &["completionTokens", "completion_tokens", "outputTokens", "output_tokens"],
+        )
+    })
+    .unwrap_or(0);
+    let cached_tokens = u64_field_any(
+        record,
+        &[
+            "cachedTokens",
+            "cached_tokens",
+            "cachedInputTokens",
+            "cached_input_tokens",
+            "prompt_cache_hit_tokens",
+        ],
+    )
+    .or_else(|| {
+        u64_field_any(
+            usage,
+            &[
+                "cachedTokens",
+                "cached_tokens",
+                "cachedInputTokens",
+                "cached_input_tokens",
+                "prompt_cache_hit_tokens",
+            ],
+        )
+    })
+    .unwrap_or(0);
+    let total_tokens = u64_field_any(
+        record,
+        &["totalTokens", "total_tokens", "tokensUsed", "tokens_used"],
+    )
+    .or_else(|| {
+        u64_field_any(
+            usage,
+            &["totalTokens", "total_tokens", "tokensUsed", "tokens_used"],
+        )
+    })
+    .unwrap_or_else(|| prompt_tokens.saturating_add(completion_tokens));
+    let cost_usd = f64_field_any(
+        record,
+        &["costUsd", "cost_usd", "cost", "total_cost", "estimated_cost"],
+    )
+    .or_else(|| {
+        f64_field_any(
+            usage,
+            &["costUsd", "cost_usd", "cost", "total_cost", "estimated_cost"],
+        )
+    })
+    .unwrap_or(0.0);
+    let runtime_id = string_field(record, "runtimeId")
+        .or_else(|| string_field(record, "runtime_id"))
+        .or_else(|| string_field(record, "identityId"))
+        .or_else(|| runtime.and_then(|runtime| string_field(runtime, "identityId")))
+        .unwrap_or_default();
+    let runtime_name = string_field(record, "runtimeName")
+        .or_else(|| string_field(record, "runtime_name"))
+        .or_else(|| runtime.and_then(|runtime| string_field(runtime, "name")))
+        .or_else(|| runtime.and_then(|runtime| string_field(runtime, "slug")))
+        .unwrap_or_default();
+    let session_key = string_field(record, "sessionKey")
+        .or_else(|| string_field(record, "session_key"))
+        .or_else(|| string_field(record, "session_id"));
+    let event_id = string_field(record, "eventId")
+        .or_else(|| string_field(record, "event_id"))
+        .or_else(|| string_field(record, "id"))
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| {
+            let stable = format!(
+                "{runtime_id}:{provider}:{model}:{recorded_at}:{prompt_tokens}:{completion_tokens}:{total_tokens}"
+            );
+            content_hash(stable.as_bytes())
+        });
+    let request_count = u64_field_any(record, &["requestCount", "request_count"])
+        .unwrap_or(1)
+        .max(1);
+
+    let mut raw_usage = Map::new();
+    raw_usage.insert("source".to_string(), json!("zeroclaw"));
+    raw_usage.insert("model".to_string(), json!(model));
+    raw_usage.insert("input_tokens".to_string(), json!(prompt_tokens));
+    raw_usage.insert("output_tokens".to_string(), json!(completion_tokens));
+    raw_usage.insert("cached_input_tokens".to_string(), json!(cached_tokens));
+    raw_usage.insert("prompt_cache_hit_tokens".to_string(), json!(cached_tokens));
+    raw_usage.insert("total_tokens".to_string(), json!(total_tokens));
+    raw_usage.insert("cost_usd".to_string(), json!(cost_usd));
+    if cost_usd > 0.0 {
+        raw_usage.insert("cost".to_string(), json!(cost_usd));
+    }
+
+    Some(json!({
+        "eventId": event_id,
+        "provider": provider,
+        "runtimeId": runtime_id,
+        "identityId": runtime_id,
+        "runtimeName": runtime_name,
+        "model": model,
+        "modelId": model,
+        "sessionKey": session_key,
+        "recordedAt": recorded_at,
+        "promptTokens": prompt_tokens,
+        "completionTokens": completion_tokens,
+        "totalTokens": total_tokens,
+        "cachedTokens": cached_tokens,
+        "requestCount": request_count,
+        "stopReason": string_field(record, "stopReason").or_else(|| string_field(record, "stop_reason")),
+        "error": string_field(record, "error"),
+        "usage": Value::Object(raw_usage)
+    }))
+}
+
 fn load_usage_events(
     path: &Path,
+    runtime: Option<&Value>,
     start: Option<&DateTime<Utc>>,
     end: Option<&DateTime<Utc>>,
 ) -> Vec<Value> {
@@ -1485,8 +1658,23 @@ fn load_usage_events(
         .rev()
         .take(USAGE_EVENT_LIMIT)
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|event| normalized_usage_event(&event, runtime))
         .filter(|event| usage_event_in_range(event, start, end))
         .collect()
+}
+
+fn runtime_usage_paths(runtime: &Value) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    let mut paths = Vec::new();
+    for key in ["usageEventsPath", "legacyUsageEventsPath"] {
+        if let Some(path) = string_field(runtime, key) {
+            let inserted = seen.insert(path.to_string());
+            if inserted {
+                paths.push(PathBuf::from(path));
+            }
+        }
+    }
+    paths
 }
 
 pub async fn handle_status(headers: HeaderMap) -> Response {
@@ -1620,13 +1808,18 @@ pub async fn handle_provider_usage(
         .into_iter()
         .flatten()
     {
-        if let Some(path) = string_field(runtime, "usageEventsPath") {
-            events.extend(load_usage_events(Path::new(path), start.as_ref(), end.as_ref()));
+        for path in runtime_usage_paths(runtime) {
+            events.extend(load_usage_events(&path, Some(runtime), start.as_ref(), end.as_ref()));
         }
     }
     if events.is_empty() {
-        events.extend(load_usage_events(&root_usage_path(), start.as_ref(), end.as_ref()));
+        events.extend(load_usage_events(&root_usage_path(), None, start.as_ref(), end.as_ref()));
     }
+    events.sort_by(|left, right| {
+        let left_time = parse_iso_datetime(string_field(left, "recordedAt"));
+        let right_time = parse_iso_datetime(string_field(right, "recordedAt"));
+        left_time.cmp(&right_time)
+    });
     if events.len() > USAGE_EVENT_LIMIT {
         events.drain(0..events.len() - USAGE_EVENT_LIMIT);
     }
@@ -1815,5 +2008,66 @@ mod tests {
                 .map(Vec::len),
             Some(1)
         );
+    }
+
+    #[test]
+    fn morneven_usage_event_normalizes_zeroclaw_cost_record() {
+        let runtime = json!({
+            "identityId": "sora-id",
+            "name": "Sora",
+            "provider": "deepseek"
+        });
+        let record = json!({
+            "id": "cost-1",
+            "session_id": "session-1",
+            "usage": {
+                "model": "deepseek-chat",
+                "input_tokens": 100,
+                "output_tokens": 40,
+                "cached_input_tokens": 20,
+                "total_tokens": 140,
+                "cost_usd": 0.003,
+                "timestamp": "2026-05-30T00:00:00Z"
+            }
+        });
+
+        let event = normalized_usage_event(&record, Some(&runtime)).unwrap();
+
+        assert_eq!(event["eventId"], "cost-1");
+        assert_eq!(event["provider"], "deepseek");
+        assert_eq!(event["runtimeId"], "sora-id");
+        assert_eq!(event["runtimeName"], "Sora");
+        assert_eq!(event["model"], "deepseek-chat");
+        assert_eq!(event["sessionKey"], "session-1");
+        assert_eq!(event["recordedAt"], "2026-05-30T00:00:00Z");
+        assert_eq!(event["promptTokens"], 100);
+        assert_eq!(event["completionTokens"], 40);
+        assert_eq!(event["cachedTokens"], 20);
+        assert_eq!(event["totalTokens"], 140);
+        assert_eq!(event["usage"]["cost"], 0.003);
+    }
+
+    #[test]
+    fn morneven_usage_event_omits_zero_cost_for_backend_estimation() {
+        let runtime = json!({
+            "identityId": "sora-id",
+            "provider": "deepseek"
+        });
+        let record = json!({
+            "id": "cost-1",
+            "usage": {
+                "model": "deepseek-chat",
+                "input_tokens": 100,
+                "output_tokens": 40,
+                "total_tokens": 140,
+                "cost_usd": 0,
+                "timestamp": "2026-05-30T00:00:00Z"
+            }
+        });
+
+        let event = normalized_usage_event(&record, Some(&runtime)).unwrap();
+
+        assert!(event["usage"].get("cost").is_none());
+        assert_eq!(event["usage"]["cost_usd"], 0.0);
     }
 }
