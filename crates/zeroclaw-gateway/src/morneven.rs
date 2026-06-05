@@ -13,6 +13,8 @@ use std::{
     collections::{BTreeMap, HashSet},
     env, fs, io,
     path::{Component, Path, PathBuf},
+    process::{Child, Command, Stdio},
+    sync::OnceLock,
     time::Duration,
 };
 
@@ -21,6 +23,8 @@ const BOT_MANAGER_TOKEN_HEADER: &str = "x-bot-manager-sync-token";
 const MAX_WORKSPACE_SYNC_BYTES: u64 = 500_000;
 const USAGE_EVENT_LIMIT: usize = 5_000;
 const DEFAULT_GATEWAY_BASE_PORT: u16 = 18_080;
+
+static RUNTIME_PROCESSES: OnceLock<parking_lot::Mutex<BTreeMap<String, Child>>> = OnceLock::new();
 
 #[derive(Debug, Deserialize)]
 pub struct ReloadRequest {
@@ -111,6 +115,10 @@ fn root_usage_path() -> PathBuf {
     runtime_root().join("provider-usage.jsonl")
 }
 
+fn runtime_processes() -> &'static parking_lot::Mutex<BTreeMap<String, Child>> {
+    RUNTIME_PROCESSES.get_or_init(|| parking_lot::Mutex::new(BTreeMap::new()))
+}
+
 fn response(status: StatusCode, payload: Value) -> Response {
     (status, Json(payload)).into_response()
 }
@@ -182,6 +190,137 @@ fn json_write(path: &Path, value: &Value) -> io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     fs::write(path, json_bytes(value)?)
+}
+
+fn toml_quote(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+fn zero_provider_name(provider: &str) -> String {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "zhipu" | "bigmodel" => "glm".to_string(),
+        "vllm" => "vllm".to_string(),
+        "deepseek" => "deepseek".to_string(),
+        "openrouter" => "openrouter".to_string(),
+        "openai" => "openai".to_string(),
+        "anthropic" => "anthropic".to_string(),
+        "gemini" => "gemini".to_string(),
+        "groq" => "groq".to_string(),
+        "ollama" => "ollama".to_string(),
+        "custom" => "custom".to_string(),
+        other => normalize_slug(other),
+    }
+}
+
+fn credential_value<'a>(credential: &'a Value, camel: &str, snake: &str) -> Option<&'a str> {
+    string_field(credential, camel).or_else(|| string_field(credential, snake))
+}
+
+fn append_provider_toml(out: &mut String, entry: &Value, provider: &str, alias: &str) -> Option<String> {
+    let credentials = entry.get("credentials")?.as_object()?;
+    let credential = credentials.get(provider)?;
+    let zero_provider = zero_provider_name(provider);
+    let model = credential_value(credential, "modelId", "model_id").unwrap_or_default();
+    let api_key = credential_value(credential, "apiKey", "api_key").unwrap_or_default();
+    let api_base = credential_value(credential, "apiBase", "api_base").unwrap_or_default();
+    out.push_str(&format!("[providers.models.{zero_provider}.{alias}]\n"));
+    if zero_provider == "custom" || provider == "vllm" {
+        out.push_str("kind = \"openai-compatible\"\n");
+    }
+    if !api_key.is_empty() {
+        out.push_str(&format!("api_key = {}\n", toml_quote(api_key)));
+    }
+    if !api_base.is_empty() {
+        out.push_str(&format!("uri = {}\n", toml_quote(api_base)));
+    }
+    if !model.is_empty() {
+        out.push_str(&format!("model = {}\n", toml_quote(model)));
+    }
+    out.push('\n');
+    Some(format!("{zero_provider}.{alias}"))
+}
+
+fn append_telegram_toml(out: &mut String, entry: &Value, alias: &str) -> Option<String> {
+    let telegram = telegram_config(entry)?;
+    let token = string_field(telegram, "token")
+        .or_else(|| string_field(telegram, "botToken"))
+        .or_else(|| string_field(telegram, "bot_token"))
+        .unwrap_or_default();
+    if token.is_empty() {
+        return None;
+    }
+    out.push_str(&format!("[channels.telegram.{alias}]\n"));
+    out.push_str("enabled = true\n");
+    out.push_str(&format!("bot_token = {}\n", toml_quote(token)));
+    out.push_str("mention_only = true\n");
+    out.push_str("ack_reactions = false\n\n");
+    Some(format!("telegram.{alias}"))
+}
+
+fn write_zeroclaw_toml_config(
+    config_path: &Path,
+    entry: &Value,
+    workspace_path: &Path,
+    gateway_port: u16,
+) -> io::Result<()> {
+    let identity = entry.get("identity").cloned().unwrap_or_else(|| json!({}));
+    let agent_alias = runtime_slug(&identity);
+    let provider = credential_provider(entry).unwrap_or_else(|| "custom".to_string());
+    let provider_ref = append_provider_toml_to_string(entry, &provider, "default");
+    let channel_ref = append_telegram_toml_to_string(entry, "default");
+    let mut out = String::new();
+
+    out.push_str("quickstart_completed = true\n\n");
+    out.push_str("[gateway]\n");
+    out.push_str("host = \"127.0.0.1\"\n");
+    out.push_str(&format!("port = {gateway_port}\n"));
+    out.push_str("require_pairing = false\n\n");
+    out.push_str("[risk_profiles.default]\n\n");
+    out.push_str("[runtime_profiles.default]\n");
+    out.push_str("agentic = true\n\n");
+
+    if let Some((_, provider_toml)) = &provider_ref {
+        out.push_str(provider_toml);
+    }
+    if let Some((_, channel_toml)) = &channel_ref {
+        out.push_str(channel_toml);
+    }
+
+    out.push_str(&format!("[agents.{agent_alias}]\n"));
+    out.push_str("enabled = true\n");
+    if let Some((reference, _)) = &provider_ref {
+        out.push_str(&format!("model_provider = {}\n", toml_quote(reference)));
+    }
+    out.push_str("risk_profile = \"default\"\n");
+    out.push_str("runtime_profile = \"default\"\n");
+    if let Some((reference, _)) = &channel_ref {
+        out.push_str(&format!("channels = [{}]\n", toml_quote(reference)));
+    }
+    out.push('\n');
+    out.push_str(&format!("[agents.{agent_alias}.workspace]\n"));
+    out.push_str(&format!(
+        "path = {}\n",
+        toml_quote(workspace_path.to_string_lossy().as_ref())
+    ));
+
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(config_path, out)
+}
+
+fn append_provider_toml_to_string(
+    entry: &Value,
+    provider: &str,
+    alias: &str,
+) -> Option<(String, String)> {
+    let mut out = String::new();
+    append_provider_toml(&mut out, entry, provider, alias).map(|reference| (reference, out))
+}
+
+fn append_telegram_toml_to_string(entry: &Value, alias: &str) -> Option<(String, String)> {
+    let mut out = String::new();
+    append_telegram_toml(&mut out, entry, alias).map(|reference| (reference, out))
 }
 
 fn load_runtime_state() -> Value {
@@ -430,7 +569,12 @@ fn runtime_entries_from_bundle(bundle: &Value) -> io::Result<Vec<Value>> {
         .get("activeIdentity")
         .or_else(|| bundle.get("mainIdentity"))
         .filter(|identity| identity.as_object().is_some())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Runtime bundle does not contain an active identity"))?;
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Runtime bundle does not contain an active identity",
+            )
+        })?;
     Ok(vec![json!({
         "identity": identity,
         "credentials": bundle.get("credentials").cloned().unwrap_or_else(|| json!({})),
@@ -482,6 +626,7 @@ fn materialize_runtime_entry(
     let workspace_path = runtime_dir.join("workspace");
     let manifest_path = runtime_dir.join(".morneven-runtime-manifest.json");
     let config_path = runtime_dir.join("config.json");
+    let zeroclaw_config_path = runtime_dir.join("config.toml");
     fs::create_dir_all(&workspace_path)?;
     let previous_manifest = load_manifest(&manifest_path);
     let mut written = BTreeMap::new();
@@ -527,6 +672,7 @@ fn materialize_runtime_entry(
     }
 
     write_runtime_config(&config_path, entry, general_config, &workspace_path, gateway_port)?;
+    write_zeroclaw_toml_config(&zeroclaw_config_path, entry, &workspace_path, gateway_port)?;
     json_write(&runtime_dir.join("telegram-topics.json"), &topic_registry_from_entry(entry))?;
     write_manifest(
         &manifest_path,
@@ -549,6 +695,7 @@ fn materialize_runtime_entry(
         "runtimePath": runtime_dir.to_string_lossy(),
         "workspacePath": workspace_path.to_string_lossy(),
         "configPath": config_path.to_string_lossy(),
+        "zeroclawConfigPath": zeroclaw_config_path.to_string_lossy(),
         "telegramTopicsPath": runtime_dir.join("telegram-topics.json").to_string_lossy(),
         "usageEventsPath": runtime_dir.join("provider-usage.jsonl").to_string_lossy(),
         "gatewayPort": gateway_port,
@@ -838,25 +985,283 @@ fn set_runtime_action(identity_id: Option<&str>, action: &str) -> io::Result<Des
     Ok(desired)
 }
 
+fn runtime_entries() -> Vec<Value> {
+    load_runtime_state()
+        .get("runtimes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn runtime_by_identity(identity_id: &str) -> Option<Value> {
+    runtime_entries()
+        .into_iter()
+        .find(|runtime| string_field(runtime, "identityId") == Some(identity_id))
+}
+
+fn pid_path_for_runtime(runtime: &Value) -> PathBuf {
+    PathBuf::from(string_field(runtime, "runtimePath").unwrap_or_default()).join("gateway.pid")
+}
+
+fn runtime_log_path(runtime: &Value) -> PathBuf {
+    PathBuf::from(string_field(runtime, "runtimePath").unwrap_or_default()).join("gateway.log")
+}
+
+fn read_pid_file(path: &Path) -> Option<u32> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+}
+
+fn write_pid_file(path: &Path, pid: u32) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, pid.to_string())
+}
+
+fn remove_pid_file(path: &Path) {
+    if path.exists() {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn runtime_process_snapshot(identity_id: &str) -> (bool, Option<u32>, Option<i32>) {
+    let mut processes = runtime_processes().lock();
+    let mut remove_process = false;
+    let snapshot = if let Some(child) = processes.get_mut(identity_id) {
+        match child.try_wait() {
+            Ok(None) => (true, Some(child.id()), None),
+            Ok(Some(status)) => {
+                remove_process = true;
+                (false, None, status.code())
+            }
+            Err(_) => {
+                remove_process = true;
+                (false, None, None)
+            }
+        }
+    } else {
+        (false, None, None)
+    };
+    if remove_process {
+        processes.remove(identity_id);
+    }
+    snapshot
+}
+
+fn spawn_gateway_process(runtime: &Value) -> io::Result<u32> {
+    let identity_id = string_field(runtime, "identityId")
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Runtime identityId is missing"))?;
+    let (running, pid, _) = runtime_process_snapshot(identity_id);
+    if running {
+        return pid.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                "Runtime process is running without a PID",
+            )
+        });
+    }
+    let pid_path = pid_path_for_runtime(runtime);
+    if let Some(pid) = read_pid_file(&pid_path) {
+        let _ = stop_external_pid(pid);
+        remove_pid_file(&pid_path);
+    }
+
+    let runtime_dir = PathBuf::from(string_field(runtime, "runtimePath").unwrap_or_default());
+    if runtime_dir.as_os_str().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Runtime path is missing",
+        ));
+    }
+    fs::create_dir_all(&runtime_dir)?;
+    let port = runtime
+        .get("gatewayPort")
+        .and_then(Value::as_u64)
+        .and_then(|port| u16::try_from(port).ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Runtime gatewayPort is missing"))?;
+    let executable = env::current_exe()?;
+    let log_file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(runtime_log_path(runtime))?;
+    let stderr_file = log_file.try_clone()?;
+    let mut child = Command::new(executable)
+        .arg("gateway")
+        .arg("start")
+        .arg("--host")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .env("ZEROCLAW_CONFIG_DIR", runtime_dir.as_os_str())
+        .env("MORNEVEN_CHILD_RUNTIME", "1")
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(stderr_file))
+        .spawn()?;
+    let pid = child.id();
+    if let Err(error) = write_pid_file(&pid_path, pid) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    runtime_processes()
+        .lock()
+        .insert(identity_id.to_string(), child);
+    append_log(format!("runtime {identity_id} started pid={pid}"));
+    Ok(pid)
+}
+
+fn stop_external_pid(pid: u32) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        let status = Command::new("taskkill")
+            .arg("/PID")
+            .arg(pid.to_string())
+            .arg("/T")
+            .arg("/F")
+            .status()?;
+        if !status.success() {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("taskkill failed for PID {pid}"),
+            ));
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let status = Command::new("kill").arg("-TERM").arg(pid.to_string()).status()?;
+        if !status.success() {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("kill failed for PID {pid}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn stop_gateway_process(runtime: &Value) -> io::Result<()> {
+    let identity_id = string_field(runtime, "identityId")
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Runtime identityId is missing"))?;
+    let pid_path = pid_path_for_runtime(runtime);
+    let child = runtime_processes().lock().remove(identity_id);
+    if let Some(mut child) = child {
+        let _ = child.kill();
+        let _ = child.wait();
+    } else if let Some(pid) = read_pid_file(&pid_path) {
+        let _ = stop_external_pid(pid);
+    }
+    remove_pid_file(&pid_path);
+    append_log(format!("runtime {identity_id} stopped"));
+    Ok(())
+}
+
+fn apply_runtime_process_action(runtime: &Value, action: &str) -> io::Result<Option<u32>> {
+    match action {
+        "start" => spawn_gateway_process(runtime).map(Some),
+        "stop" => {
+            stop_gateway_process(runtime)?;
+            Ok(None)
+        }
+        "restart" => {
+            stop_gateway_process(runtime)?;
+            spawn_gateway_process(runtime).map(Some)
+        }
+        _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid runtime action")),
+    }
+}
+
+fn apply_gateway_process_action(action: &str) -> io::Result<Vec<Value>> {
+    let mut results = Vec::new();
+    let runtimes = runtime_entries();
+    if runtimes.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "No Morneven runtimes have been materialized",
+        ));
+    }
+    for runtime in runtimes {
+        let identity_id = string_field(&runtime, "identityId").unwrap_or_default().to_string();
+        match apply_runtime_process_action(&runtime, action) {
+            Ok(pid) => results.push(json!({
+                "identityId": identity_id,
+                "ok": true,
+                "pid": pid
+            })),
+            Err(error) => results.push(json!({
+                "identityId": identity_id,
+                "ok": false,
+                "error": error.to_string()
+            })),
+        }
+    }
+    if results.iter().any(|item| !bool_field(item, "ok")) {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            json!(results).to_string(),
+        ));
+    }
+    Ok(results)
+}
+
+fn restore_desired_runtimes() {
+    if env::var("MORNEVEN_CHILD_RUNTIME").ok().as_deref() == Some("1") {
+        return;
+    }
+    let desired = load_desired_state();
+    for runtime in runtime_entries() {
+        let Some(identity_id) = string_field(&runtime, "identityId") else {
+            continue;
+        };
+        let desired_state = desired
+            .runtimes
+            .get(identity_id)
+            .map(|entry| entry.state.as_str())
+            .unwrap_or(desired.global.as_str());
+        if desired_state == "running" {
+            let (running, _, _) = runtime_process_snapshot(identity_id);
+            if !running {
+                let _ = spawn_gateway_process(&runtime);
+            }
+        }
+    }
+}
+
+fn runtime_uptime_seconds(started_at: Option<&String>) -> Option<i64> {
+    let started_at = started_at?;
+    let started_at = DateTime::parse_from_rfc3339(started_at).ok()?;
+    Some((Utc::now() - started_at.with_timezone(&Utc)).num_seconds().max(0))
+}
+
 fn runtime_status(runtime: &Value, desired: &DesiredGatewayState) -> Value {
     let identity_id = string_field(runtime, "identityId").unwrap_or_default();
     let desired_runtime = desired.runtimes.get(identity_id);
     let desired_state = desired_runtime
         .map(|entry| entry.state.as_str())
         .unwrap_or("stopped");
+    let (process_running, pid, last_exit_code) = runtime_process_snapshot(identity_id);
+    let state = if process_running { "running" } else { "stopped" };
+    let uptime = if process_running {
+        runtime_uptime_seconds(desired_runtime.and_then(|entry| entry.started_at.as_ref()))
+    } else {
+        None
+    };
     json!({
-        "state": desired_state,
+        "state": state,
         "identityId": identity_id,
         "name": string_field(runtime, "name").unwrap_or_default(),
-        "pid": null,
-        "uptime": null,
+        "pid": pid,
+        "uptime": uptime,
         "startedAt": desired_runtime.and_then(|entry| entry.started_at.clone()),
         "restart_count": desired_runtime.map(|entry| entry.restart_count).unwrap_or(0),
         "gatewayPort": runtime.get("gatewayPort").cloned().unwrap_or(Value::Null),
         "telegramBotUsername": runtime.get("telegramBotUsername").cloned().unwrap_or(Value::Null),
         "telegramTokenFingerprint": runtime.get("telegramTokenFingerprint").cloned().unwrap_or(Value::Null),
         "lastError": null,
-        "lastExitCode": null,
+        "lastExitCode": last_exit_code,
         "desiredState": desired_state,
         "autoRestartEnabled": true,
         "lastUnplannedExitAt": null,
@@ -1079,6 +1484,7 @@ pub async fn handle_status(headers: HeaderMap) -> Response {
     if let Err(error) = require_morneven_token(&headers) {
         return error;
     }
+    restore_desired_runtimes();
     response(
         StatusCode::OK,
         json!({
@@ -1098,6 +1504,12 @@ pub async fn handle_reload(headers: HeaderMap, Json(body): Json<ReloadRequest>) 
         Ok(bundle) => match materialize_morneven_runtime(&bundle) {
             Ok(state) => {
                 if body.restart_gateway.unwrap_or(false) {
+                    if let Err(error) = apply_gateway_process_action("restart") {
+                        return response(
+                            StatusCode::BAD_GATEWAY,
+                            json!({"ok": false, "error": error.to_string()}),
+                        );
+                    }
                     let _ = set_runtime_action(None, "restart");
                 }
                 response(
@@ -1149,7 +1561,10 @@ pub async fn handle_workspace_changes(headers: HeaderMap) -> Response {
                         .join(".morneven-runtime-manifest.json");
                     let changes = workspace_changes_at(&workspace, &manifest);
                     let mut payload = value_object(&changes).cloned().unwrap_or_default();
-                    payload.insert("identityId".to_string(), json!(string_field(runtime, "identityId").unwrap_or_default()));
+                    payload.insert(
+                        "identityId".to_string(),
+                        json!(string_field(runtime, "identityId").unwrap_or_default()),
+                    );
                     payload.insert(
                         "identity".to_string(),
                         json!({
@@ -1232,7 +1647,7 @@ pub async fn handle_gateway_action(headers: HeaderMap, AxumPath(action): AxumPat
             let _ = materialize_morneven_runtime(&bundle);
         }
     }
-    match set_runtime_action(None, &action) {
+    match apply_gateway_process_action(&action).and_then(|_| set_runtime_action(None, &action)) {
         Ok(_) => response(
             StatusCode::OK,
             json!({
@@ -1267,7 +1682,15 @@ pub async fn handle_runtime_gateway_action(
             let _ = materialize_morneven_runtime(&bundle);
         }
     }
-    match set_runtime_action(Some(&identity_id), &action) {
+    let Some(runtime) = runtime_by_identity(&identity_id) else {
+        return response(
+            StatusCode::NOT_FOUND,
+            json!({"ok": false, "error": "Runtime identity was not found"}),
+        );
+    };
+    match apply_runtime_process_action(&runtime, &action)
+        .and_then(|_| set_runtime_action(Some(&identity_id), &action))
+    {
         Ok(_) => response(
             StatusCode::OK,
             json!({
@@ -1301,5 +1724,45 @@ mod tests {
             content_hash(b"morneven"),
             "94c02c15d942f312c181956cd1914cb8d75e520e44adc50eec0c7d2084e784e1"
         );
+    }
+
+    #[test]
+    fn morneven_provider_translates_to_zeroclaw_toml() {
+        let entry = json!({
+            "credentials": {
+                "deepseek": {
+                    "apiKey": "sk-test",
+                    "modelId": "deepseek-chat",
+                    "apiBase": "https://api.deepseek.com"
+                }
+            }
+        });
+        let (reference, toml) =
+            append_provider_toml_to_string(&entry, "deepseek", "default").unwrap();
+
+        assert_eq!(reference, "deepseek.default");
+        assert!(toml.contains("[providers.models.deepseek.default]"));
+        assert!(toml.contains("api_key = \"sk-test\""));
+        assert!(toml.contains("model = \"deepseek-chat\""));
+        assert!(toml.contains("uri = \"https://api.deepseek.com\""));
+    }
+
+    #[test]
+    fn morneven_telegram_channel_translates_to_zeroclaw_toml() {
+        let entry = json!({
+            "channels": {
+                "telegram": {
+                    "enabled": true,
+                    "token": "123:ABC"
+                }
+            }
+        });
+        let (reference, toml) = append_telegram_toml_to_string(&entry, "default").unwrap();
+
+        assert_eq!(reference, "telegram.default");
+        assert!(toml.contains("[channels.telegram.default]"));
+        assert!(toml.contains("enabled = true"));
+        assert!(toml.contains("bot_token = \"123:ABC\""));
+        assert!(toml.contains("mention_only = true"));
     }
 }
