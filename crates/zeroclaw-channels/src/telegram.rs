@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use parking_lot::{Mutex, RwLock};
 use reqwest::multipart::{Form, Part};
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use zeroclaw_api::channel::{Channel, ChannelMessage, SendMessage};
@@ -417,6 +417,7 @@ pub struct TelegramChannel {
     /// tool approval prompt before auto-denying. Configurable via
     /// `channels.telegram.approval_timeout_secs`. Default: 120.
     approval_timeout_secs: u64,
+    morneven_topic_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -472,6 +473,10 @@ impl TelegramChannel {
             tool_command_specs: Vec::new(),
             pending_approvals: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             approval_timeout_secs: 120,
+            morneven_topic_path: std::env::var("ZEROCLAW_CONFIG_DIR")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| PathBuf::from(value).join("telegram-topics.json")),
         }
     }
 
@@ -600,6 +605,364 @@ impl TelegramChannel {
         } else {
             (reply_target.to_string(), None)
         }
+    }
+
+    fn morneven_topic_id_text(value: impl AsRef<str>) -> String {
+        let text = value.as_ref().trim();
+        if text.is_empty() || matches!(text.to_ascii_lowercase().as_str(), "0" | "1" | "main") {
+            "main".to_string()
+        } else {
+            text.to_string()
+        }
+    }
+
+    fn morneven_topic_id(value: Option<&serde_json::Value>) -> String {
+        match value {
+            Some(serde_json::Value::String(text)) => Self::morneven_topic_id_text(text),
+            Some(serde_json::Value::Number(number)) => {
+                Self::morneven_topic_id_text(number.to_string())
+            }
+            _ => "main".to_string(),
+        }
+    }
+
+    fn morneven_message_chat_id(message: &serde_json::Value) -> Option<String> {
+        message
+            .get("chat")
+            .and_then(|chat| chat.get("id"))
+            .and_then(serde_json::Value::as_i64)
+            .map(|id| id.to_string())
+    }
+
+    fn morneven_message_topic_id(message: &serde_json::Value) -> String {
+        Self::morneven_topic_id(message.get("message_thread_id"))
+    }
+
+    fn read_morneven_topic_state(&self) -> serde_json::Value {
+        self.morneven_topic_path
+            .as_ref()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+            .unwrap_or_else(|| serde_json::json!({"groups": []}))
+    }
+
+    fn write_morneven_topic_state(&self, state: &serde_json::Value) {
+        let Some(path) = &self.morneven_topic_path else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(content) = serde_json::to_vec_pretty(state) {
+            let _ = std::fs::write(path, content);
+        }
+    }
+
+    fn morneven_topic_lock(state: &serde_json::Value) -> Option<&serde_json::Value> {
+        state.get("topicLock").or_else(|| {
+            if state.get("enabled").is_some() || state.get("groups").is_some() {
+                Some(state)
+            } else {
+                None
+            }
+        })
+    }
+
+    fn morneven_lock_group<'a>(
+        lock: &'a serde_json::Value,
+        chat_id: &str,
+    ) -> Option<&'a serde_json::Value> {
+        lock.get("groups")
+            .and_then(serde_json::Value::as_array)?
+            .iter()
+            .find(|group| {
+                group
+                    .get("chatId")
+                    .or_else(|| group.get("chat_id"))
+                    .map(|value| match value {
+                        serde_json::Value::String(text) => text.trim().to_string(),
+                        serde_json::Value::Number(number) => number.to_string(),
+                        _ => String::new(),
+                    })
+                    .as_deref()
+                    == Some(chat_id)
+            })
+    }
+
+    fn morneven_group_topic_allows(group: &serde_json::Value, topic_id: &str) -> bool {
+        if topic_id == "main" {
+            return group
+                .get("allowMainTopic")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+        }
+        group
+            .get("allowedTopicIds")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .any(|item| Self::morneven_topic_id(Some(item)) == topic_id)
+            })
+            .unwrap_or(false)
+    }
+
+    fn morneven_lock_has_group_rules(lock: &serde_json::Value) -> bool {
+        lock.get("groups")
+            .and_then(serde_json::Value::as_array)
+            .map(|groups| {
+                groups.iter().any(|group| {
+                    let allowed = group
+                        .get("allowedTopicIds")
+                        .and_then(serde_json::Value::as_array)
+                        .map(Vec::len)
+                        .unwrap_or(0);
+                    let primary = Self::morneven_topic_id(group.get("primaryTopicId"));
+                    group.get("allowMainTopic").and_then(serde_json::Value::as_bool)
+                        == Some(false)
+                        || allowed > 0
+                        || primary != "main"
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    fn morneven_topic_lock_enabled(lock: &serde_json::Value) -> bool {
+        lock.get("enabled").and_then(serde_json::Value::as_bool) == Some(true)
+            || Self::morneven_lock_has_group_rules(lock)
+    }
+
+    fn morneven_primary_topic(group: &serde_json::Value) -> Option<String> {
+        let primary = Self::morneven_topic_id(group.get("primaryTopicId"));
+        if Self::morneven_group_topic_allows(group, &primary) {
+            return Some(primary);
+        }
+        if let Some(topic) = group
+            .get("allowedTopicIds")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|item| Self::morneven_topic_id(Some(item)))
+            .find(|topic| topic != "main" && Self::morneven_group_topic_allows(group, topic))
+        {
+            return Some(topic);
+        }
+        if Self::morneven_group_topic_allows(group, "main") {
+            return Some("main".to_string());
+        }
+        None
+    }
+
+    fn morneven_topic_allowed(&self, chat_id: &str, topic_id: &str) -> bool {
+        let state = self.read_morneven_topic_state();
+        let Some(lock) = Self::morneven_topic_lock(&state) else {
+            return true;
+        };
+        if !Self::morneven_topic_lock_enabled(lock) {
+            return true;
+        }
+        let Some(group) = Self::morneven_lock_group(lock, chat_id) else {
+            return true;
+        };
+        Self::morneven_group_topic_allows(group, topic_id)
+    }
+
+    fn morneven_inbound_topic_allowed(&self, message: &serde_json::Value) -> bool {
+        if Self::is_private_message(message) {
+            return true;
+        }
+        let Some(chat_id) = Self::morneven_message_chat_id(message) else {
+            return true;
+        };
+        let topic_id = Self::morneven_message_topic_id(message);
+        let allowed = self.morneven_topic_allowed(&chat_id, &topic_id);
+        if !allowed {
+            ::zeroclaw_log::record!(
+                INFO,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_attrs(::serde_json::json!({
+                        "chat": chat_id,
+                        "thread": topic_id,
+                        "channel": "telegram",
+                        "alias": self.alias,
+                    })),
+                "morneven topic_lock_drop"
+            );
+        }
+        allowed
+    }
+
+    fn morneven_topic_title(message: &serde_json::Value, topic_id: &str) -> String {
+        for key in ["forum_topic_created", "forum_topic_edited"] {
+            if let Some(name) = message
+                .get(key)
+                .and_then(|event| event.get("name"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+            {
+                return name.trim().to_string();
+            }
+        }
+        if topic_id == "main" {
+            "Main topic".to_string()
+        } else {
+            format!("Topic {topic_id}")
+        }
+    }
+
+    fn record_morneven_topic(&self, message: &serde_json::Value) {
+        if self.morneven_topic_path.is_none() || Self::is_private_message(message) {
+            return;
+        }
+        let Some(chat_id) = Self::morneven_message_chat_id(message) else {
+            return;
+        };
+        let topic_id = Self::morneven_message_topic_id(message);
+        let now = chrono::Utc::now().to_rfc3339();
+        let chat = message.get("chat");
+        let chat_title = chat
+            .and_then(|chat| chat.get("title"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let is_forum = chat
+            .and_then(|chat| chat.get("is_forum"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let mut state = self.read_morneven_topic_state();
+        let Some(state_object) = state.as_object_mut() else {
+            return;
+        };
+        let groups = state_object
+            .entry("groups".to_string())
+            .or_insert_with(|| serde_json::json!([]));
+        let Some(groups) = groups.as_array_mut() else {
+            return;
+        };
+        let group_index = groups.iter().position(|group| {
+            group
+                .get("chatId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                == Some(chat_id.as_str())
+        });
+        let group = if let Some(index) = group_index {
+            &mut groups[index]
+        } else {
+            groups.push(serde_json::json!({
+                "chatId": chat_id,
+                "title": chat_title.clone(),
+                "isForum": is_forum,
+                "lastSeenAt": now.clone(),
+                "source": "observed",
+                "topics": []
+            }));
+            groups.last_mut().unwrap()
+        };
+        if let Some(group_object) = group.as_object_mut() {
+            if !chat_title.is_empty() {
+                group_object.insert("title".to_string(), serde_json::json!(chat_title));
+            }
+            group_object.insert("isForum".to_string(), serde_json::json!(is_forum));
+            group_object.insert("lastSeenAt".to_string(), serde_json::json!(now));
+            let topics = group_object
+                .entry("topics".to_string())
+                .or_insert_with(|| serde_json::json!([]));
+            if let Some(topics) = topics.as_array_mut() {
+                let topic_index = topics.iter().position(|topic| {
+                    Self::morneven_topic_id(topic.get("messageThreadId")) == topic_id
+                });
+                if let Some(index) = topic_index {
+                    if let Some(topic_object) = topics[index].as_object_mut() {
+                        if topic_object
+                            .get("title")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .is_empty()
+                        {
+                            topic_object.insert(
+                                "title".to_string(),
+                                serde_json::json!(Self::morneven_topic_title(message, &topic_id)),
+                            );
+                        }
+                        topic_object
+                            .insert("lastSeenAt".to_string(), serde_json::json!(now.clone()));
+                        if topic_object
+                            .get("source")
+                            .and_then(serde_json::Value::as_str)
+                            != Some("manual")
+                        {
+                            topic_object
+                                .insert("source".to_string(), serde_json::json!("observed"));
+                        }
+                    }
+                } else {
+                    topics.push(serde_json::json!({
+                        "messageThreadId": topic_id.clone(),
+                        "title": Self::morneven_topic_title(message, &topic_id),
+                        "lastSeenAt": now,
+                        "source": "observed"
+                    }));
+                }
+            }
+        }
+        self.write_morneven_topic_state(&state);
+    }
+
+    fn prepare_morneven_outbound_target(
+        &self,
+        chat_id: &str,
+        thread_id: Option<&str>,
+    ) -> Option<(String, Option<String>)> {
+        if !chat_id.starts_with('-') {
+            return Some((chat_id.to_string(), thread_id.map(ToOwned::to_owned)));
+        }
+        let topic_id = thread_id
+            .map(|value| Self::morneven_topic_id_text(value))
+            .unwrap_or_else(|| "main".to_string());
+        let state = self.read_morneven_topic_state();
+        let Some(lock) = Self::morneven_topic_lock(&state) else {
+            return Some((chat_id.to_string(), thread_id.map(ToOwned::to_owned)));
+        };
+        if !Self::morneven_topic_lock_enabled(lock) {
+            return Some((chat_id.to_string(), thread_id.map(ToOwned::to_owned)));
+        }
+        let Some(group) = Self::morneven_lock_group(lock, chat_id) else {
+            return Some((chat_id.to_string(), thread_id.map(ToOwned::to_owned)));
+        };
+        if Self::morneven_group_topic_allows(group, &topic_id) {
+            return Some((chat_id.to_string(), thread_id.map(ToOwned::to_owned)));
+        }
+        if thread_id.is_none()
+            && let Some(primary) = Self::morneven_primary_topic(group)
+        {
+            ::zeroclaw_log::record!(
+                INFO,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_attrs(::serde_json::json!({
+                        "chat": chat_id,
+                        "thread": topic_id,
+                        "target": primary.clone(),
+                        "channel": "telegram",
+                        "alias": self.alias,
+                    })),
+                "morneven topic_lock_redirect"
+            );
+            let thread = if primary == "main" { None } else { Some(primary) };
+            return Some((chat_id.to_string(), thread));
+        }
+        ::zeroclaw_log::record!(
+            INFO,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_attrs(::serde_json::json!({
+                    "chat": chat_id,
+                    "thread": topic_id,
+                    "channel": "telegram",
+                    "alias": self.alias,
+                })),
+            "morneven topic_lock_block"
+        );
+        None
     }
 
     fn extract_update_message_target(update: &serde_json::Value) -> Option<(String, i64)> {
@@ -1214,6 +1577,15 @@ impl TelegramChannel {
             .and_then(|c| c.get("type"))
             .and_then(|t| t.as_str())
             .map(|t| t == "group" || t == "supergroup")
+            .unwrap_or(false)
+    }
+
+    fn is_private_message(message: &serde_json::Value) -> bool {
+        message
+            .get("chat")
+            .and_then(|c| c.get("type"))
+            .and_then(|t| t.as_str())
+            .map(|t| t == "private")
             .unwrap_or(false)
     }
 
@@ -3009,7 +3381,12 @@ impl Channel for TelegramChannel {
             return Ok(None);
         }
 
-        let (chat_id, thread_id) = Self::parse_reply_target(&message.recipient);
+        let (raw_chat_id, raw_thread_id) = Self::parse_reply_target(&message.recipient);
+        let Some((chat_id, thread_id)) =
+            self.prepare_morneven_outbound_target(&raw_chat_id, raw_thread_id.as_deref())
+        else {
+            return Ok(None);
+        };
         let initial_text = if message.content.is_empty() {
             "...".to_string()
         } else {
@@ -3020,7 +3397,7 @@ impl Channel for TelegramChannel {
             "chat_id": chat_id,
             "text": initial_text,
         });
-        if let Some(tid) = thread_id {
+        if let Some(tid) = thread_id.as_deref() {
             body["message_thread_id"] = serde_json::Value::String(tid.to_string());
         }
 
@@ -3133,10 +3510,19 @@ impl Channel for TelegramChannel {
         text: &str,
     ) -> anyhow::Result<()> {
         let text = &strip_tool_call_tags(text);
-        let (chat_id, thread_id) = Self::parse_reply_target(recipient);
+        let (raw_chat_id, raw_thread_id) = Self::parse_reply_target(recipient);
+        let Some((chat_id, thread_id)) =
+            self.prepare_morneven_outbound_target(&raw_chat_id, raw_thread_id.as_deref())
+        else {
+            return Ok(());
+        };
+        let prepared_recipient = match thread_id.as_deref() {
+            Some(thread_id) => format!("{chat_id}:{thread_id}"),
+            None => chat_id.clone(),
+        };
 
         // Queue TTS voice reply — immediate mode since text is already final
-        self.try_queue_voice_reply(recipient, text, true);
+        self.try_queue_voice_reply(&prepared_recipient, text, true);
 
         // Clean up rate-limit tracking for this chat
         self.last_draft_edit.lock().remove(&chat_id);
@@ -3358,38 +3744,48 @@ impl Channel for TelegramChannel {
         let content = strip_tool_call_tags(&message.content);
 
         // Parse recipient: "chat_id" or "chat_id:thread_id" format
-        let (chat_id, thread_id) = match message.recipient.split_once(':') {
+        let (raw_chat_id, raw_thread_id) = match message.recipient.split_once(':') {
             Some((chat, thread)) => (chat, Some(thread)),
             None => (message.recipient.as_str(), None),
+        };
+        let Some((chat_id, thread_id)) =
+            self.prepare_morneven_outbound_target(raw_chat_id, raw_thread_id)
+        else {
+            return Ok(());
+        };
+        let prepared_recipient = match thread_id.as_deref() {
+            Some(thread_id) => format!("{chat_id}:{thread_id}"),
+            None => chat_id.clone(),
         };
 
         // Voice chat mode: send text normally AND queue a voice note of the
         // final answer. Text in → text out. Voice in → text + voice out.
-        self.try_queue_voice_reply(&message.recipient, &content, false);
+        self.try_queue_voice_reply(&prepared_recipient, &content, false);
 
         // Always send text reply (voice chat gets both text and voice)
         let (text_without_markers, attachments) = parse_attachment_markers(&content);
 
         if !attachments.is_empty() {
             if !text_without_markers.is_empty() {
-                self.send_text_chunks(&text_without_markers, chat_id, thread_id)
+                self.send_text_chunks(&text_without_markers, &chat_id, thread_id.as_deref())
                     .await?;
             }
 
             for attachment in &attachments {
-                self.send_attachment(chat_id, thread_id, attachment).await?;
+                self.send_attachment(&chat_id, thread_id.as_deref(), attachment)
+                    .await?;
             }
 
             return Ok(());
         }
 
         if let Some(attachment) = parse_path_only_attachment(&content) {
-            self.send_attachment(chat_id, thread_id, &attachment)
+            self.send_attachment(&chat_id, thread_id.as_deref(), &attachment)
                 .await?;
             return Ok(());
         }
 
-        self.send_text_chunks(&content, chat_id, thread_id).await
+        self.send_text_chunks(&content, &chat_id, thread_id.as_deref()).await
     }
 
     async fn listen(&self, tx: tokio::sync::mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
@@ -3674,6 +4070,13 @@ Ensure only one `zeroclaw` process is using this bot token."
                         continue; // callback_query is not a regular message
                     }
 
+                    if let Some(message) = update.get("message") {
+                        self.record_morneven_topic(message);
+                        if !self.morneven_inbound_topic_allowed(message) {
+                            continue;
+                        }
+                    }
+
                     let msg = if let Some(m) = self.parse_update_message(update) {
                         m
                     } else if let Some(m) = self.try_parse_voice_message(update).await {
@@ -3786,9 +4189,14 @@ Ensure only one `zeroclaw` process is using this bot token."
         use zeroclaw_api::channel::ChannelApprovalResponse;
 
         // Parse recipient for chat_id + optional thread_id ("chat_id:thread_id" format).
-        let (chat_id, thread_id) = recipient
+        let (raw_chat_id, raw_thread_id) = recipient
             .split_once(':')
             .map_or((recipient, None), |(c, t)| (c, Some(t)));
+        let Some((chat_id, thread_id)) =
+            self.prepare_morneven_outbound_target(raw_chat_id, raw_thread_id)
+        else {
+            return Ok(None);
+        };
 
         // Unique key embedded in callback_data so listen() can route the tap.
         let approval_id = uuid::Uuid::new_v4().to_string();
@@ -3816,7 +4224,7 @@ Ensure only one `zeroclaw` process is using this bot token."
             "parse_mode": "HTML",
             "reply_markup": reply_markup,
         });
-        if let Some(tid) = thread_id {
+        if let Some(tid) = thread_id.as_deref() {
             body["message_thread_id"] = serde_json::Value::String(tid.to_string());
         }
 
@@ -3915,6 +4323,99 @@ Ensure only one `zeroclaw` process is using this bot token."
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_topic_state_path(name: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!("zeroclaw_{name}_{}_{}", std::process::id(), nonce))
+            .join("telegram-topics.json")
+    }
+
+    #[test]
+    fn morneven_topic_lock_redirects_main_to_primary_topic() {
+        let path = temp_topic_state_path("topic_redirect");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "groups": [],
+                "topicLock": {
+                    "enabled": true,
+                    "groups": [{
+                        "chatId": "-100",
+                        "allowedTopicIds": ["159"],
+                        "allowMainTopic": false,
+                        "primaryTopicId": "159"
+                    }]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut ch = TelegramChannel::new(
+            "fake-token".into(),
+            "default",
+            Arc::new(|| vec!["*".into()]),
+            false,
+        );
+        ch.morneven_topic_path = Some(path.clone());
+
+        assert_eq!(
+            ch.prepare_morneven_outbound_target("-100", None),
+            Some(("-100".to_string(), Some("159".to_string())))
+        );
+        assert_eq!(
+            ch.prepare_morneven_outbound_target("-100", Some("159")),
+            Some(("-100".to_string(), Some("159".to_string())))
+        );
+        assert_eq!(ch.prepare_morneven_outbound_target("-100", Some("2")), None);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn morneven_topic_lock_drops_locked_inbound_topic() {
+        let path = temp_topic_state_path("topic_drop");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "groups": [],
+                "topicLock": {
+                    "enabled": true,
+                    "groups": [{
+                        "chatId": "-100",
+                        "allowedTopicIds": ["159"],
+                        "allowMainTopic": false,
+                        "primaryTopicId": "159"
+                    }]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut ch = TelegramChannel::new(
+            "fake-token".into(),
+            "default",
+            Arc::new(|| vec!["*".into()]),
+            false,
+        );
+        ch.morneven_topic_path = Some(path.clone());
+        let locked = serde_json::json!({
+            "chat": {"id": -100, "type": "supergroup"},
+            "message_thread_id": 2
+        });
+        let allowed = serde_json::json!({
+            "chat": {"id": -100, "type": "supergroup"},
+            "message_thread_id": 159
+        });
+
+        assert!(!ch.morneven_inbound_topic_allowed(&locked));
+        assert!(ch.morneven_inbound_topic_allowed(&allowed));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
 
     #[test]
     fn with_voice_peer_prefs_seeds_static_voice_peers_for_matching_groups_only() {

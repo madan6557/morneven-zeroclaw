@@ -546,12 +546,21 @@ fn auto_dream_enabled(entry: &Value) -> Option<bool> {
 }
 
 fn topic_registry_from_entry(entry: &Value) -> Value {
-    entry.get("channels")
-        .and_then(|channels| channels.get("telegram"))
+    let telegram = entry
+        .get("channels")
+        .and_then(|channels| channels.get("telegram"));
+    let mut registry = telegram
         .and_then(|telegram| telegram.get("topicRegistry"))
         .filter(|registry| registry.get("groups").and_then(Value::as_array).is_some())
         .cloned()
-        .unwrap_or_else(|| json!({"groups": []}))
+        .unwrap_or_else(|| json!({"groups": []}));
+    if let (Some(registry_object), Some(lock)) = (
+        registry.as_object_mut(),
+        telegram.and_then(|telegram| telegram.get("topicLock")),
+    ) {
+        registry_object.insert("topicLock".to_string(), lock.clone());
+    }
+    registry
 }
 
 fn runtime_entries_from_bundle(bundle: &Value) -> io::Result<Vec<Value>> {
@@ -1764,5 +1773,47 @@ mod tests {
         assert!(toml.contains("enabled = true"));
         assert!(toml.contains("bot_token = \"123:ABC\""));
         assert!(toml.contains("mention_only = true"));
+    }
+
+    #[test]
+    fn morneven_topic_state_keeps_lock_rules_with_registry() {
+        let entry = json!({
+            "channels": {
+                "telegram": {
+                    "enabled": true,
+                    "topicRegistry": {
+                        "groups": [{
+                            "chatId": "-100",
+                            "topics": []
+                        }]
+                    },
+                    "topicLock": {
+                        "enabled": true,
+                        "groups": [{
+                            "chatId": "-100",
+                            "allowedTopicIds": ["159"],
+                            "allowMainTopic": false,
+                            "primaryTopicId": "159"
+                        }]
+                    }
+                }
+            }
+        });
+        let state = topic_registry_from_entry(&entry);
+
+        assert_eq!(
+            state
+                .get("topicLock")
+                .and_then(|lock| lock.get("enabled"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            state
+                .get("groups")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
     }
 }
