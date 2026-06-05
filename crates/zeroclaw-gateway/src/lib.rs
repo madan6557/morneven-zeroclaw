@@ -29,6 +29,7 @@ pub mod api_webauthn;
 pub mod auth_rate_limit;
 pub mod canvas;
 pub mod hardware_context;
+pub mod morneven;
 pub mod node_tool;
 pub mod nodes;
 pub mod openapi;
@@ -1458,6 +1459,32 @@ pub async fn run_gateway(
         .route("/hooks/claude-code", post(api::handle_claude_code_hook))
         // ── Web Dashboard API routes ──
         .route("/api/status", get(api::handle_api_status))
+        .route("/api/morneven/status", get(morneven::handle_status))
+        .route("/api/morneven/reload", post(morneven::handle_reload))
+        .route(
+            "/api/morneven/config-secrets",
+            get(morneven::handle_config_secrets),
+        )
+        .route(
+            "/api/morneven/workspace/changes",
+            get(morneven::handle_workspace_changes),
+        )
+        .route(
+            "/api/morneven/telegram/topics",
+            get(morneven::handle_telegram_topics),
+        )
+        .route(
+            "/api/morneven/provider-usage",
+            get(morneven::handle_provider_usage),
+        )
+        .route(
+            "/api/morneven/gateway/{action}",
+            post(morneven::handle_gateway_action),
+        )
+        .route(
+            "/api/morneven/runtimes/{identity_id}/gateway/{action}",
+            post(morneven::handle_runtime_gateway_action),
+        )
         .route("/api/logs", get(api_logs::handle_api_logs))
         .route(
             "/api/config",
