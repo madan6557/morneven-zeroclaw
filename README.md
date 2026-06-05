@@ -181,6 +181,16 @@ Thanks to the communities that incubated early work: **Harvard University**, **M
   </a>
 </p>
 
+## Morneven fork notice
+
+This repository is the Morneven integration fork maintained at
+`madan6557/morneven-zeroclaw`. It is not affiliated with, endorsed by, or
+maintained by ZeroClaw Labs.
+
+The upstream project remains `zeroclaw-labs/zeroclaw`. Morneven-specific work
+lives on the `development` branch and targets drop-in Bot Manager compatibility
+for Railway deployments. See [docs/morneven.md](docs/morneven.md).
+
 <p align="center">
   <a href="https://github.com/zeroclaw-labs/zeroclaw/graphs/contributors">
     <img src="https://contrib.rocks/image?repo=zeroclaw-labs/zeroclaw" alt="ZeroClaw contributors" />
