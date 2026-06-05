@@ -1217,7 +1217,7 @@ fn apply_gateway_process_action(action: &str) -> io::Result<Vec<Value>> {
     Ok(results)
 }
 
-fn restore_desired_runtimes() {
+pub(crate) fn restore_desired_runtimes() {
     if env::var("MORNEVEN_CHILD_RUNTIME").ok().as_deref() == Some("1") {
         return;
     }

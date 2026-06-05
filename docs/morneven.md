@@ -43,6 +43,11 @@ uses:
 Every endpoint requires `x-morneven-reload-token` to match
 `MORNEVEN_RELOAD_TOKEN` or `NANOBOT_MORNEVEN_RELOAD_TOKEN`.
 
+`POST /api/morneven/reload` pulls the Bot Manager runtime bundle from
+`MORNEVEN_BACKEND_INTERNAL_URL`, `MORNEVEN_BACKEND_PUBLIC_URL`, or the existing
+Nanobot backend URL variables. The sync request uses
+`MORNEVEN_BOT_MANAGER_SYNC_TOKEN` or `BOT_MANAGER_SYNC_TOKEN`.
+
 ## Bot Manager Parity Target
 
 The first compatibility target is current Bot Manager parity:
@@ -55,3 +60,30 @@ The first compatibility target is current Bot Manager parity:
 - provider usage export for local analytics
 - restart restore after Railway restarts
 
+## Runtime Behavior
+
+Bot Manager identities are materialized as separate ZeroClaw runtime directories
+under `MORNEVEN_ZEROCLAW_ROOT` or `ZEROCLAW_MORNEVEN_ROOT`. If neither is set,
+the fork uses `~/.zeroclaw/morneven`.
+
+The parent gateway persists desired runtime state. On Railway restart it restores
+any runtime that was marked running. Child runtimes are started with
+`MORNEVEN_CHILD_RUNTIME=1`, so they do not recursively restore or spawn other
+runtimes.
+
+## Telegram Topic Lock
+
+The Telegram channel reads `telegram-topics.json` from each runtime directory.
+It records observed groups and topics, drops inbound messages from locked
+topics, blocks outbound messages to forbidden explicit topics, and redirects
+main-topic outbound system messages to the configured primary topic when one is
+available.
+
+## Provider Usage Export
+
+`GET /api/morneven/provider-usage` normalizes ZeroClaw cost records from
+`state/costs.jsonl` into the Bot Manager usage event shape. It includes provider,
+model, runtime identity, prompt tokens, completion tokens, cached tokens, total
+tokens, request count, timestamp, and cost when ZeroClaw has a non-zero cost
+record. If cost is zero because provider pricing is unavailable, Bot Manager can
+still estimate usage cost from the token fields.

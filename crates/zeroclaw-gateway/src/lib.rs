@@ -549,6 +549,7 @@ pub async fn run_gateway(
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let actual_port = listener.local_addr()?.port();
     let display_addr = format!("{host}:{actual_port}");
+    morneven::restore_desired_runtimes();
 
     let (boot_family, boot_alias, boot_entry) = config
         .providers
