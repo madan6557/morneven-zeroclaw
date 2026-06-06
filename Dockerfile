@@ -109,7 +109,7 @@ RUN mkdir -p /zeroclaw-data/.zeroclaw /zeroclaw-data/data && \
         'default_temperature = 0.7' \
         '' \
         '[gateway]' \
-        'port = 42617' \
+        'port = 8080' \
         'host = "[::]"' \
         'allow_public_bind = true' \
         'require_pairing = false' \
@@ -152,11 +152,11 @@ ENV HOME=/zeroclaw-data
 # `environment:`). Legacy `PROVIDER`, `ZEROCLAW_MODEL`, `ANTHROPIC_API_KEY`,
 # `API_KEY`, etc. fallbacks were eradicated. Example:
 #   docker run -e ZEROCLAW_providers__models__anthropic__default__api_key=sk-ant-... ...
-ENV ZEROCLAW_gateway__port=42617
+ENV ZEROCLAW_gateway__port=8080
 
 WORKDIR /zeroclaw-data
 USER 65534:65534
-EXPOSE 42617
+EXPOSE 8080
 HEALTHCHECK --interval=60s --timeout=10s --retries=3 --start-period=10s \
     CMD ["zeroclaw", "status", "--format=exit-code"]
 ENTRYPOINT ["zeroclaw"]
@@ -179,13 +179,13 @@ ENV HOME=/zeroclaw-data
 # Default provider and model are set in config.toml, not here,
 # so config file edits are not silently overridden
 #ENV PROVIDER=
-ENV ZEROCLAW_GATEWAY_PORT=42617
+ENV ZEROCLAW_gateway__port=8080
 
 # API_KEY must be provided at runtime!
 
 WORKDIR /zeroclaw-data
 USER 65534:65534
-EXPOSE 42617
+EXPOSE 8080
 HEALTHCHECK --interval=60s --timeout=10s --retries=3 --start-period=10s \
     CMD ["zeroclaw", "status", "--format=exit-code"]
 ENTRYPOINT ["zeroclaw"]
