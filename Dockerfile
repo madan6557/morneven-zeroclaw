@@ -40,7 +40,8 @@ COPY Cargo.toml Cargo.lock ./
 # Cargo must compile during the dependency pre-fetch step; copy it explicitly.
 COPY --parents crates/*/Cargo.toml ./
 COPY --parents crates/aardvark-sys/build.rs ./
-# apps/tauri: .dockerignore whitelists only Cargo.toml; src and build.rs are stubbed below.
+# apps/*: .dockerignore whitelists only Cargo.toml; src and build.rs are stubbed below.
+COPY apps/zerocode/Cargo.toml apps/zerocode/Cargo.toml
 COPY apps/tauri/Cargo.toml apps/tauri/Cargo.toml
 # tools/fill-translations and xtask are dev/build tools; copy manifests only so
 # Cargo can resolve the workspace, then stub their entry points so the
@@ -51,11 +52,12 @@ COPY xtask/Cargo.toml xtask/Cargo.toml
 # `src/bin/zeroclaw-acp-bridge.rs` is required because the `acp-bridge` feature
 # is in the root crate's default set; cargo selects the bin target during the
 # pre-fetch build even with only the workspace lib stubbed.
-RUN mkdir -p src src/bin benches apps/tauri/src tools/fill-translations/src xtask/src/bin \
+RUN mkdir -p src src/bin benches apps/zerocode/src apps/tauri/src tools/fill-translations/src xtask/src/bin \
     && echo "fn main() {}" > src/main.rs \
     && echo "" > src/lib.rs \
     && echo "fn main() {}" > src/bin/zeroclaw-acp-bridge.rs \
     && echo "fn main() {}" > benches/agent_benchmarks.rs \
+    && echo "fn main() {}" > apps/zerocode/src/main.rs \
     && echo "fn main() {}" > apps/tauri/src/main.rs \
     && echo "fn main() {}" > apps/tauri/build.rs \
     && echo "fn main() {}" > tools/fill-translations/src/main.rs \
