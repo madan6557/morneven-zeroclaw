@@ -145,6 +145,7 @@ RUN chown 65534:65534 /zeroclaw-data/.zeroclaw/config.toml
 ENV LANG=C.UTF-8
 # Bootstrap (uppercase tail) — pre-load: decides where the config file lives.
 ENV ZEROCLAW_DATA_DIR=/zeroclaw-data/data
+ENV MORNEVEN_ZEROCLAW_ROOT=/zeroclaw-data/data/morneven
 ENV HOME=/zeroclaw-data
 ENV ZEROCLAW_gateway__host="[::]"
 # V0.8.0 env-var grammar: `ZEROCLAW_<dotted_path_with_double_underscores>=<value>`
@@ -156,7 +157,7 @@ ENV ZEROCLAW_gateway__host="[::]"
 ENV ZEROCLAW_gateway__port=8080
 
 WORKDIR /zeroclaw-data
-USER 65534:65534
+USER 0:0
 EXPOSE 8080
 HEALTHCHECK --interval=60s --timeout=10s --retries=3 --start-period=10s \
     CMD ["zeroclaw", "status", "--format=exit-code"]
@@ -176,6 +177,7 @@ COPY --from=web-builder /app/web/dist /usr/share/zeroclawlabs/web/dist
 # Ensure UTF-8 locale so CJK / multibyte input is handled correctly
 ENV LANG=C.UTF-8
 ENV ZEROCLAW_DATA_DIR=/zeroclaw-data/data
+ENV MORNEVEN_ZEROCLAW_ROOT=/zeroclaw-data/data/morneven
 ENV HOME=/zeroclaw-data
 ENV ZEROCLAW_gateway__host="[::]"
 # Default provider and model are set in config.toml, not here,
@@ -186,7 +188,7 @@ ENV ZEROCLAW_gateway__port=8080
 # API_KEY must be provided at runtime!
 
 WORKDIR /zeroclaw-data
-USER 65534:65534
+USER 0:0
 EXPOSE 8080
 HEALTHCHECK --interval=60s --timeout=10s --retries=3 --start-period=10s \
     CMD ["zeroclaw", "status", "--format=exit-code"]
