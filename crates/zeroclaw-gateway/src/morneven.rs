@@ -245,14 +245,7 @@ fn append_provider_toml(out: &mut String, entry: &Value, provider: &str, alias: 
 }
 
 fn append_telegram_toml(out: &mut String, entry: &Value, alias: &str) -> Option<String> {
-    let telegram = telegram_config(entry)?;
-    let token = string_field(telegram, "token")
-        .or_else(|| string_field(telegram, "botToken"))
-        .or_else(|| string_field(telegram, "bot_token"))
-        .unwrap_or_default();
-    if token.is_empty() {
-        return None;
-    }
+    let token = telegram_token_for_alias(entry, alias)?;
     out.push_str(&format!("[channels.telegram.{alias}]\n"));
     out.push_str("enabled = true\n");
     out.push_str(&format!("bot_token = {}\n", toml_quote(token)));
@@ -274,6 +267,10 @@ fn write_zeroclaw_toml_config(
     let channel_ref = append_telegram_toml_to_string(entry, "default");
     let mut out = String::new();
 
+    out.push_str(&format!(
+        "schema_version = {}\n",
+        zeroclaw_config::migration::CURRENT_SCHEMA_VERSION
+    ));
     out.push_str("quickstart_completed = true\n\n");
     out.push_str("[gateway]\n");
     out.push_str("host = \"127.0.0.1\"\n");
@@ -518,19 +515,50 @@ fn credential_model(entry: &Value, provider: &str) -> Option<String> {
         })
 }
 
-fn telegram_config(entry: &Value) -> Option<&Value> {
+fn telegram_root(entry: &Value) -> Option<&Value> {
     entry.get("channels")
         .and_then(|channels| channels.get("telegram"))
-        .filter(|telegram| bool_field(telegram, "enabled"))
+}
+
+fn telegram_token_value(value: &Value) -> Option<&str> {
+    string_field(value, "token")
+        .or_else(|| string_field(value, "botToken"))
+        .or_else(|| string_field(value, "bot_token"))
+}
+
+fn enabled_with_fallback(value: &Value, fallback: bool) -> bool {
+    value
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(fallback)
+}
+
+fn telegram_token_for_alias<'a>(entry: &'a Value, alias: &str) -> Option<&'a str> {
+    let telegram = telegram_root(entry)?;
+    let root_enabled = bool_field(telegram, "enabled");
+    if root_enabled {
+        if let Some(token) = telegram_token_value(telegram) {
+            return Some(token);
+        }
+    }
+    if let Some(alias_config) = telegram.get(alias).filter(|value| value.is_object()) {
+        if enabled_with_fallback(alias_config, root_enabled) {
+            if let Some(token) = telegram_token_value(alias_config) {
+                return Some(token);
+            }
+        }
+    }
+    if root_enabled {
+        return value_object(telegram)
+            .into_iter()
+            .flat_map(|children| children.values())
+            .find_map(telegram_token_value);
+    }
+    None
 }
 
 fn telegram_token_fingerprint(entry: &Value) -> Option<String> {
-    let token = telegram_config(entry)
-        .and_then(|telegram| {
-            string_field(telegram, "token")
-                .or_else(|| string_field(telegram, "botToken"))
-                .or_else(|| string_field(telegram, "bot_token"))
-        })?;
+    let token = telegram_token_for_alias(entry, "default")?;
     Some(content_hash(token.as_bytes()).chars().take(12).collect())
 }
 
@@ -1104,6 +1132,8 @@ fn spawn_gateway_process(runtime: &Value) -> io::Result<u32> {
         .open(&runtime_log)?;
     let stderr_file = log_file.try_clone()?;
     let mut child = Command::new(executable)
+        .arg("--config-dir")
+        .arg(&runtime_dir)
         .arg("daemon")
         .arg("--host")
         .arg("127.0.0.1")
@@ -1994,6 +2024,70 @@ mod tests {
         assert!(toml.contains("enabled = true"));
         assert!(toml.contains("bot_token = \"123:ABC\""));
         assert!(toml.contains("mention_only = true"));
+    }
+
+    #[test]
+    fn morneven_telegram_nested_channel_token_translates_to_zeroclaw_toml() {
+        let entry = json!({
+            "channels": {
+                "telegram": {
+                    "enabled": true,
+                    "default": {
+                        "bot_token": "123:ABC"
+                    }
+                }
+            }
+        });
+        let (reference, toml) = append_telegram_toml_to_string(&entry, "default").unwrap();
+
+        assert_eq!(reference, "telegram.default");
+        assert!(toml.contains("[channels.telegram.default]"));
+        assert!(toml.contains("bot_token = \"123:ABC\""));
+    }
+
+    #[test]
+    fn morneven_telegram_channel_without_token_is_not_emitted() {
+        let entry = json!({
+            "channels": {
+                "telegram": {
+                    "enabled": true,
+                    "topicRegistry": {
+                        "groups": []
+                    },
+                    "topicLock": {
+                        "enabled": true
+                    }
+                }
+            }
+        });
+
+        assert!(append_telegram_toml_to_string(&entry, "default").is_none());
+    }
+
+    #[test]
+    fn morneven_runtime_toml_uses_current_schema_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let workspace_path = dir.path().join("workspace");
+        let entry = json!({
+            "identity": {
+                "slug": "sora"
+            },
+            "credentials": {
+                "deepseek": {
+                    "apiKey": "sk-test",
+                    "modelId": "deepseek-chat"
+                }
+            }
+        });
+
+        write_zeroclaw_toml_config(&config_path, &entry, &workspace_path, 18080).unwrap();
+        let toml = std::fs::read_to_string(config_path).unwrap();
+
+        assert!(toml.starts_with(&format!(
+            "schema_version = {}\n",
+            zeroclaw_config::migration::CURRENT_SCHEMA_VERSION
+        )));
     }
 
     #[test]
