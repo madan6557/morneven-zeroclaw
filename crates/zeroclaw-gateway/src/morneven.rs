@@ -165,7 +165,11 @@ fn append_log(message: impl AsRef<str>) {
 }
 
 fn read_recent_logs(limit: usize) -> Vec<String> {
-    let Ok(content) = fs::read_to_string(log_path()) else {
+    read_recent_file_lines(&log_path(), limit)
+}
+
+fn read_recent_file_lines(path: &Path, limit: usize) -> Vec<String> {
+    let Ok(content) = fs::read_to_string(path) else {
         return Vec::new();
     };
     let mut lines: Vec<String> = content.lines().map(ToOwned::to_owned).collect();
@@ -1093,24 +1097,36 @@ fn spawn_gateway_process(runtime: &Value) -> io::Result<u32> {
         .and_then(|port| u16::try_from(port).ok())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Runtime gatewayPort is missing"))?;
     let executable = env::current_exe()?;
+    let runtime_log = runtime_log_path(runtime);
     let log_file = fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(runtime_log_path(runtime))?;
+        .open(&runtime_log)?;
     let stderr_file = log_file.try_clone()?;
     let mut child = Command::new(executable)
-        .arg("gateway")
-        .arg("start")
+        .arg("daemon")
         .arg("--host")
         .arg("127.0.0.1")
         .arg("--port")
         .arg(port.to_string())
         .env("ZEROCLAW_CONFIG_DIR", runtime_dir.as_os_str())
+        .env("ZEROCLAW_DATA_DIR", runtime_dir.join("data").as_os_str())
         .env("MORNEVEN_CHILD_RUNTIME", "1")
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(stderr_file))
         .spawn()?;
     let pid = child.id();
+    std::thread::sleep(Duration::from_millis(500));
+    if let Some(status) = child.try_wait()? {
+        let last_log = read_recent_file_lines(&runtime_log, 5).join("\n");
+        remove_pid_file(&pid_path);
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!(
+                "Runtime process exited during startup with status {status}. Last log: {last_log}"
+            ),
+        ));
+    }
     if let Err(error) = write_pid_file(&pid_path, pid) {
         let _ = child.kill();
         let _ = child.wait();
@@ -1254,6 +1270,18 @@ fn runtime_status(runtime: &Value, desired: &DesiredGatewayState) -> Value {
         .unwrap_or("stopped");
     let (process_running, pid, last_exit_code) = runtime_process_snapshot(identity_id);
     let state = if process_running { "running" } else { "stopped" };
+    let last_log_line = read_recent_file_lines(&runtime_log_path(runtime), 1)
+        .first()
+        .cloned()
+        .or_else(|| read_recent_logs(1).first().cloned());
+    let last_error = if process_running {
+        Value::Null
+    } else {
+        last_log_line
+            .as_ref()
+            .map(|line| json!(line))
+            .unwrap_or(Value::Null)
+    };
     let uptime = if process_running {
         runtime_uptime_seconds(desired_runtime.and_then(|entry| entry.started_at.as_ref()))
     } else {
@@ -1270,13 +1298,13 @@ fn runtime_status(runtime: &Value, desired: &DesiredGatewayState) -> Value {
         "gatewayPort": runtime.get("gatewayPort").cloned().unwrap_or(Value::Null),
         "telegramBotUsername": runtime.get("telegramBotUsername").cloned().unwrap_or(Value::Null),
         "telegramTokenFingerprint": runtime.get("telegramTokenFingerprint").cloned().unwrap_or(Value::Null),
-        "lastError": null,
+        "lastError": last_error,
         "lastExitCode": last_exit_code,
         "desiredState": desired_state,
         "autoRestartEnabled": true,
         "lastUnplannedExitAt": null,
         "lastRestartAt": desired_runtime.and_then(|entry| entry.last_action_at.clone()),
-        "lastLogLine": read_recent_logs(1).first().cloned(),
+        "lastLogLine": last_log_line,
         "slug": string_field(runtime, "slug").unwrap_or_default(),
         "isMain": bool_field(runtime, "isMain"),
         "workspacePath": string_field(runtime, "workspacePath").unwrap_or_default(),
