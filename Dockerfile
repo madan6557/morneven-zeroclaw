@@ -24,7 +24,7 @@ RUN cargo web build
 FROM rust:1.94-slim@sha256:da9dab7a6b8dd428e71718402e97207bb3e54167d37b5708616050b1e8f60ed6 AS builder
 
 WORKDIR /app
-ARG ZEROCLAW_CARGO_FEATURES="channel-lark,whatsapp-web"
+ARG ZEROCLAW_CARGO_FEATURES=""
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
