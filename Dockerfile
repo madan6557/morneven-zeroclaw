@@ -146,6 +146,7 @@ ENV LANG=C.UTF-8
 # Bootstrap (uppercase tail) — pre-load: decides where the config file lives.
 ENV ZEROCLAW_DATA_DIR=/zeroclaw-data/data
 ENV HOME=/zeroclaw-data
+ENV ZEROCLAW_gateway__host="[::]"
 # V0.8.0 env-var grammar: `ZEROCLAW_<dotted_path_with_double_underscores>=<value>`
 # mirrors the TOML config 1:1; `__` is the path separator. Operators inject
 # credentials and runtime knobs at `docker run -e ...` (or via docker-compose
@@ -176,6 +177,7 @@ COPY --from=web-builder /app/web/dist /usr/share/zeroclawlabs/web/dist
 ENV LANG=C.UTF-8
 ENV ZEROCLAW_DATA_DIR=/zeroclaw-data/data
 ENV HOME=/zeroclaw-data
+ENV ZEROCLAW_gateway__host="[::]"
 # Default provider and model are set in config.toml, not here,
 # so config file edits are not silently overridden
 #ENV PROVIDER=

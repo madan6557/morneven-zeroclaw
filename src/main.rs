@@ -3486,7 +3486,7 @@ async fn main() -> Result<()> {
                 }
                 None => {
                     let port = config.gateway.port;
-                    let host = config.gateway.host.clone();
+                    let host = normalize_gateway_host_for_platform(config.gateway.host.clone());
                     log_gateway_start(&host, port);
                     Box::pin(run_gateway_if_enabled(&host, port, config, None)).await
                 }
@@ -3522,7 +3522,9 @@ async fn main() -> Result<()> {
                 }
             }
             let port = port.unwrap_or(config.gateway.port);
-            let host = host.unwrap_or_else(|| config.gateway.host.clone());
+            let host = normalize_gateway_host_for_platform(
+                host.unwrap_or_else(|| config.gateway.host.clone()),
+            );
             if port == 0 {
                 ::zeroclaw_log::record!(
                     INFO,
@@ -5570,7 +5572,18 @@ fi"#
 fn resolve_gateway_addr(config: &Config, port: Option<u16>, host: Option<String>) -> (u16, String) {
     let port = port.unwrap_or(config.gateway.port);
     let host = host.unwrap_or_else(|| config.gateway.host.clone());
-    (port, host)
+    (port, normalize_gateway_host_for_platform(host))
+}
+
+fn normalize_gateway_host_for_platform(host: String) -> String {
+    let trimmed = host.trim();
+    if trimmed == "::" {
+        return "[::]".to_string();
+    }
+    if trimmed == "0.0.0.0" && std::env::var("RAILWAY_PRIVATE_DOMAIN").is_ok() {
+        return "[::]".to_string();
+    }
+    host
 }
 
 /// Log gateway startup message.
