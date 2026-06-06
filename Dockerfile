@@ -66,11 +66,7 @@ RUN mkdir -p src src/bin benches apps/zerocode/src apps/tauri/src tools/fill-tra
     && echo "fn main() {}" > xtask/src/bin/fluent.rs \
     && echo "fn main() {}" > xtask/src/bin/web.rs \
     && for d in crates/*/; do mkdir -p "${d}src" && printf '' > "${d}src/lib.rs"; done
-RUN if [ -n "$ZEROCLAW_CARGO_FEATURES" ]; then \
-      cargo build --release --locked --features "$ZEROCLAW_CARGO_FEATURES"; \
-    else \
-      cargo build --release --locked; \
-    fi
+RUN cargo fetch
 RUN rm -rf src benches crates xtask tools/fill-translations
 
 # 2. Copy only build-relevant source paths (avoid cache-busting on docs/tests/scripts)
