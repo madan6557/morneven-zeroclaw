@@ -7,9 +7,7 @@ FROM rust:1.94-slim@sha256:da9dab7a6b8dd428e71718402e97207bb3e54167d37b570861605
 WORKDIR /app
 COPY --from=web-node /usr/local/bin/node /usr/local/bin/node
 COPY --from=web-node /usr/local/lib/node_modules /usr/local/lib/node_modules
-RUN --mount=type=cache,id=cacheKey-zeroclaw-apt-cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,id=cacheKey-zeroclaw-apt-lib,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y \
         pkg-config \
     && ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
@@ -20,10 +18,7 @@ COPY . .
 RUN mkdir -p apps/tauri/src \
     && echo "fn main() {}" > apps/tauri/src/main.rs \
     && echo "fn main() {}" > apps/tauri/build.rs
-RUN --mount=type=cache,id=cacheKey-zeroclaw-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=cacheKey-zeroclaw-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=cacheKey-zeroclaw-web-target,target=/app/target,sharing=locked \
-    cargo web build
+RUN cargo web build
 
 # ── Stage 1: Build ────────────────────────────────────────────
 FROM rust:1.94-slim@sha256:da9dab7a6b8dd428e71718402e97207bb3e54167d37b5708616050b1e8f60ed6 AS builder
@@ -32,9 +27,7 @@ WORKDIR /app
 ARG ZEROCLAW_CARGO_FEATURES="channel-lark,whatsapp-web"
 
 # Install build dependencies
-RUN --mount=type=cache,id=cacheKey-zeroclaw-apt-cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,id=cacheKey-zeroclaw-apt-lib,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y \
         pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
@@ -71,10 +64,7 @@ RUN mkdir -p src src/bin benches apps/tauri/src tools/fill-translations/src xtas
     && echo "fn main() {}" > xtask/src/bin/fluent.rs \
     && echo "fn main() {}" > xtask/src/bin/web.rs \
     && for d in crates/*/; do mkdir -p "${d}src" && printf '' > "${d}src/lib.rs"; done
-RUN --mount=type=cache,id=cacheKey-zeroclaw-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=cacheKey-zeroclaw-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=cacheKey-zeroclaw-target,target=/app/target,sharing=locked \
-    if [ -n "$ZEROCLAW_CARGO_FEATURES" ]; then \
+RUN if [ -n "$ZEROCLAW_CARGO_FEATURES" ]; then \
       cargo build --release --locked --features "$ZEROCLAW_CARGO_FEATURES"; \
     else \
       cargo build --release --locked; \
@@ -89,10 +79,7 @@ COPY xtask/ xtask/
 COPY tools/fill-translations/ tools/fill-translations/
 COPY *.rs .
 RUN touch src/main.rs
-RUN --mount=type=cache,id=cacheKey-zeroclaw-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=cacheKey-zeroclaw-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=cacheKey-zeroclaw-target,target=/app/target,sharing=locked \
-    rm -rf target/release/.fingerprint/zeroclawlabs-* \
+RUN rm -rf target/release/.fingerprint/zeroclawlabs-* \
            target/release/deps/zeroclawlabs-* \
            target/release/incremental/zeroclawlabs-* \
            target/release/.fingerprint/zeroclaw-* \
