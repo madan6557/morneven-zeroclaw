@@ -251,6 +251,22 @@ fn append_telegram_toml(out: &mut String, entry: &Value, alias: &str) -> Option<
     out.push_str(&format!("bot_token = {}\n", toml_quote(token)));
     out.push_str("mention_only = true\n");
     out.push_str("ack_reactions = false\n\n");
+    let allowed_peers = telegram_allowed_peers_for_alias(entry, alias);
+    if !allowed_peers.is_empty() {
+        out.push_str(&format!("[peer_groups.telegram_{alias}]\n"));
+        out.push_str(&format!(
+            "channel = {}\n",
+            toml_quote(&format!("telegram.{alias}"))
+        ));
+        out.push_str(&format!(
+            "external_peers = [{}]\n\n",
+            allowed_peers
+                .iter()
+                .map(|peer| toml_quote(peer))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
     Some(format!("telegram.{alias}"))
 }
 
@@ -363,6 +379,25 @@ fn value_object(value: &Value) -> Option<&Map<String, Value>> {
 
 fn string_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
+}
+
+fn string_array_field(value: &Value, key: &str) -> Vec<String> {
+    match value.get(key) {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+        Some(Value::String(text)) => text
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn bool_field(value: &Value, key: &str) -> bool {
@@ -531,6 +566,52 @@ fn enabled_with_fallback(value: &Value, fallback: bool) -> bool {
         .get("enabled")
         .and_then(Value::as_bool)
         .unwrap_or(fallback)
+}
+
+fn telegram_allowed_peer_values(value: &Value) -> Vec<String> {
+    [
+        "allowFrom",
+        "allow_from",
+        "allowedUserIds",
+        "allowed_user_ids",
+        "allowedUsers",
+        "allowed_users",
+    ]
+    .into_iter()
+    .flat_map(|key| string_array_field(value, key))
+    .collect()
+}
+
+fn normalize_telegram_peer(value: &str) -> String {
+    value.trim().trim_start_matches('@').to_string()
+}
+
+fn dedupe_telegram_peers(peers: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for peer in peers {
+        let normalized = normalize_telegram_peer(&peer);
+        if normalized.is_empty() {
+            continue;
+        }
+        if seen.insert(normalized.clone()) {
+            out.push(normalized);
+        }
+    }
+    out
+}
+
+fn telegram_allowed_peers_for_alias(entry: &Value, alias: &str) -> Vec<String> {
+    let Some(telegram) = telegram_root(entry) else {
+        return Vec::new();
+    };
+    let root_peers = telegram_allowed_peer_values(telegram);
+    let alias_peers = telegram
+        .get(alias)
+        .filter(|value| value.is_object())
+        .map(telegram_allowed_peer_values)
+        .unwrap_or_default();
+    dedupe_telegram_peers(root_peers.into_iter().chain(alias_peers))
 }
 
 fn telegram_token_for_alias<'a>(entry: &'a Value, alias: &str) -> Option<&'a str> {
@@ -2024,6 +2105,24 @@ mod tests {
         assert!(toml.contains("enabled = true"));
         assert!(toml.contains("bot_token = \"123:ABC\""));
         assert!(toml.contains("mention_only = true"));
+    }
+
+    #[test]
+    fn morneven_telegram_allow_from_translates_to_peer_group() {
+        let entry = json!({
+            "channels": {
+                "telegram": {
+                    "enabled": true,
+                    "token": "123:ABC",
+                    "allowFrom": ["6606508025", "@alice", "6606508025"]
+                }
+            }
+        });
+        let (_, toml) = append_telegram_toml_to_string(&entry, "default").unwrap();
+
+        assert!(toml.contains("[peer_groups.telegram_default]"));
+        assert!(toml.contains("channel = \"telegram.default\""));
+        assert!(toml.contains("external_peers = [\"6606508025\", \"alice\"]"));
     }
 
     #[test]
