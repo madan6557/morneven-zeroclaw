@@ -82,8 +82,9 @@ available.
 ## Provider Usage Export
 
 `GET /api/morneven/provider-usage` normalizes ZeroClaw cost records from
-`state/costs.jsonl` into the Bot Manager usage event shape. It includes provider,
-model, runtime identity, prompt tokens, completion tokens, cached tokens, total
-tokens, request count, timestamp, and cost when ZeroClaw has a non-zero cost
-record. If cost is zero because provider pricing is unavailable, Bot Manager can
-still estimate usage cost from the token fields.
+`data/state/costs.jsonl` into the Bot Manager usage event shape, with fallbacks
+for older runtime usage files. It includes provider, model, runtime identity,
+prompt tokens, completion tokens, cached tokens, total tokens, request count,
+timestamp, and cost when ZeroClaw has a non-zero cost record. If cost is zero
+because provider pricing is unavailable, Bot Manager can still estimate usage
+cost from the token fields.

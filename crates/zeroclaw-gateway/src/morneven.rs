@@ -819,7 +819,11 @@ fn materialize_runtime_entry(
         "configPath": config_path.to_string_lossy(),
         "zeroclawConfigPath": zeroclaw_config_path.to_string_lossy(),
         "telegramTopicsPath": runtime_dir.join("telegram-topics.json").to_string_lossy(),
-        "usageEventsPath": runtime_dir.join("state").join("costs.jsonl").to_string_lossy(),
+        "usageEventsPath": runtime_dir
+            .join("data")
+            .join("state")
+            .join("costs.jsonl")
+            .to_string_lossy(),
         "legacyUsageEventsPath": runtime_dir.join("provider-usage.jsonl").to_string_lossy(),
         "gatewayPort": gateway_port,
         "telegramBotUsername": null,
@@ -1108,6 +1112,52 @@ fn set_runtime_action(identity_id: Option<&str>, action: &str) -> io::Result<Des
     Ok(desired)
 }
 
+fn ensure_runtime_desired_entry<'a>(
+    desired: &'a mut DesiredGatewayState,
+    identity_id: &str,
+) -> &'a mut DesiredRuntimeState {
+    desired
+        .runtimes
+        .entry(identity_id.to_string())
+        .or_insert_with(|| DesiredRuntimeState {
+            identity_id: identity_id.to_string(),
+            state: "stopped".to_string(),
+            started_at: None,
+            stopped_at: None,
+            restart_count: 0,
+            last_action_at: None,
+        })
+}
+
+fn mark_runtime_started(identity_id: &str, reset_started_at: bool) -> io::Result<String> {
+    let mut desired = load_desired_state();
+    let now = now_iso();
+    let started_at = {
+        let entry = ensure_runtime_desired_entry(&mut desired, identity_id);
+        entry.state = "running".to_string();
+        entry.stopped_at = None;
+        if reset_started_at || entry.started_at.is_none() {
+            entry.started_at = Some(now.clone());
+        }
+        entry.started_at.clone().unwrap_or_else(|| now.clone())
+    };
+    desired.updated_at = Some(now);
+    save_desired_state(&desired)?;
+    Ok(started_at)
+}
+
+fn mark_runtime_stopped(identity_id: &str) -> io::Result<()> {
+    let mut desired = load_desired_state();
+    let now = now_iso();
+    {
+        let entry = ensure_runtime_desired_entry(&mut desired, identity_id);
+        entry.state = "stopped".to_string();
+        entry.stopped_at = Some(now.clone());
+    }
+    desired.updated_at = Some(now);
+    save_desired_state(&desired)
+}
+
 fn runtime_entries() -> Vec<Value> {
     load_runtime_state()
         .get("runtimes")
@@ -1179,6 +1229,7 @@ fn spawn_gateway_process(runtime: &Value) -> io::Result<u32> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Runtime identityId is missing"))?;
     let (running, pid, _) = runtime_process_snapshot(identity_id);
     if running {
+        let _ = mark_runtime_started(identity_id, false);
         return pid.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::Other,
@@ -1246,6 +1297,7 @@ fn spawn_gateway_process(runtime: &Value) -> io::Result<u32> {
     runtime_processes()
         .lock()
         .insert(identity_id.to_string(), child);
+    let _ = mark_runtime_started(identity_id, true);
     append_log(format!("runtime {identity_id} started pid={pid}"));
     Ok(pid)
 }
@@ -1292,6 +1344,7 @@ fn stop_gateway_process(runtime: &Value) -> io::Result<()> {
         let _ = stop_external_pid(pid);
     }
     remove_pid_file(&pid_path);
+    let _ = mark_runtime_stopped(identity_id);
     append_log(format!("runtime {identity_id} stopped"));
     Ok(())
 }
@@ -1393,8 +1446,14 @@ fn runtime_status(runtime: &Value, desired: &DesiredGatewayState) -> Value {
             .map(|line| json!(line))
             .unwrap_or(Value::Null)
     };
+    let started_at = desired_runtime.and_then(|entry| entry.started_at.clone());
+    let started_at = if process_running && started_at.is_none() {
+        mark_runtime_started(identity_id, false).ok()
+    } else {
+        started_at
+    };
     let uptime = if process_running {
-        runtime_uptime_seconds(desired_runtime.and_then(|entry| entry.started_at.as_ref()))
+        runtime_uptime_seconds(started_at.as_ref())
     } else {
         None
     };
@@ -1404,7 +1463,7 @@ fn runtime_status(runtime: &Value, desired: &DesiredGatewayState) -> Value {
         "name": string_field(runtime, "name").unwrap_or_default(),
         "pid": pid,
         "uptime": uptime,
-        "startedAt": desired_runtime.and_then(|entry| entry.started_at.clone()),
+        "startedAt": started_at,
         "restart_count": desired_runtime.map(|entry| entry.restart_count).unwrap_or(0),
         "gatewayPort": runtime.get("gatewayPort").cloned().unwrap_or(Value::Null),
         "telegramBotUsername": runtime.get("telegramBotUsername").cloned().unwrap_or(Value::Null),
@@ -1807,13 +1866,46 @@ fn runtime_usage_paths(runtime: &Value) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     for key in ["usageEventsPath", "legacyUsageEventsPath"] {
         if let Some(path) = string_field(runtime, key) {
-            let inserted = seen.insert(path.to_string());
-            if inserted {
-                paths.push(PathBuf::from(path));
-            }
+            push_usage_path(&mut paths, &mut seen, PathBuf::from(path));
         }
     }
+    if let Some(runtime_path) =
+        string_field(runtime, "runtimePath").filter(|value| !value.is_empty())
+    {
+        let runtime_path = PathBuf::from(runtime_path);
+        push_usage_path(
+            &mut paths,
+            &mut seen,
+            runtime_path.join("data").join("state").join("costs.jsonl"),
+        );
+        push_usage_path(
+            &mut paths,
+            &mut seen,
+            runtime_path.join("state").join("costs.jsonl"),
+        );
+        push_usage_path(
+            &mut paths,
+            &mut seen,
+            runtime_path.join("provider-usage.jsonl"),
+        );
+    }
+    if let Some(workspace_path) =
+        string_field(runtime, "workspacePath").filter(|value| !value.is_empty())
+    {
+        push_usage_path(
+            &mut paths,
+            &mut seen,
+            PathBuf::from(workspace_path).join("state").join("costs.jsonl"),
+        );
+    }
     paths
+}
+
+fn push_usage_path(paths: &mut Vec<PathBuf>, seen: &mut HashSet<String>, path: PathBuf) {
+    let key = path.to_string_lossy().to_string();
+    if seen.insert(key) {
+        paths.push(path);
+    }
 }
 
 pub async fn handle_status(headers: HeaderMap) -> Response {
@@ -2229,6 +2321,30 @@ mod tests {
                 .map(Vec::len),
             Some(1)
         );
+    }
+
+    #[test]
+    fn morneven_runtime_usage_paths_include_current_and_legacy_cost_files() {
+        let runtime_dir = PathBuf::from("runtime-dir");
+        let workspace_dir = runtime_dir.join("workspace");
+        let current_costs = runtime_dir.join("data").join("state").join("costs.jsonl");
+        let runtime_state_costs = runtime_dir.join("state").join("costs.jsonl");
+        let legacy_usage = runtime_dir.join("provider-usage.jsonl");
+        let workspace_costs = workspace_dir.join("state").join("costs.jsonl");
+        let runtime = json!({
+            "runtimePath": runtime_dir.to_string_lossy().to_string(),
+            "workspacePath": workspace_dir.to_string_lossy().to_string(),
+            "usageEventsPath": current_costs.to_string_lossy().to_string(),
+            "legacyUsageEventsPath": legacy_usage.to_string_lossy().to_string()
+        });
+
+        let paths = runtime_usage_paths(&runtime);
+
+        assert!(paths.contains(&current_costs));
+        assert!(paths.contains(&runtime_state_costs));
+        assert!(paths.contains(&legacy_usage));
+        assert!(paths.contains(&workspace_costs));
+        assert_eq!(paths.len(), 4);
     }
 
     #[test]
