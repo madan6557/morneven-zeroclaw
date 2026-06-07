@@ -1496,10 +1496,20 @@ fn gateway_status() -> Value {
         .find(|runtime| bool_field(runtime, "isMain"))
         .cloned()
         .or_else(|| runtimes.first().cloned());
+    let running_count = runtimes
+        .iter()
+        .filter(|runtime| string_field(runtime, "state") == Some("running"))
+        .count();
+    let stopped_count = runtimes.len().saturating_sub(running_count);
+    let aggregate_state = if running_count > 0 {
+        "running"
+    } else {
+        "stopped"
+    };
     json!({
-        "state": desired.global,
-        "running": runtimes.iter().filter(|runtime| string_field(runtime, "state") == Some("running")).count(),
-        "stopped": runtimes.iter().filter(|runtime| string_field(runtime, "state") != Some("running")).count(),
+        "state": aggregate_state,
+        "running": running_count,
+        "stopped": stopped_count,
         "runtimeCount": runtimes.len(),
         "identityId": main.as_ref().and_then(|runtime| string_field(runtime, "identityId")).unwrap_or_default(),
         "name": main.as_ref().and_then(|runtime| string_field(runtime, "name")).unwrap_or_default(),
