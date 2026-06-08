@@ -302,6 +302,7 @@ fn write_zeroclaw_toml_config(
     if let Some((_, channel_toml)) = &channel_ref {
         out.push_str(channel_toml);
     }
+    let cron_aliases = append_morneven_cron_toml(&mut out, entry);
 
     out.push_str(&format!("[agents.{agent_alias}]\n"));
     out.push_str("enabled = true\n");
@@ -313,12 +314,19 @@ fn write_zeroclaw_toml_config(
     if let Some((reference, _)) = &channel_ref {
         out.push_str(&format!("channels = [{}]\n", toml_quote(reference)));
     }
+    if !cron_aliases.is_empty() {
+        out.push_str(&format!("cron_jobs = {}\n", toml_string_array(&cron_aliases)));
+    }
     out.push('\n');
     out.push_str(&format!("[agents.{agent_alias}.workspace]\n"));
     out.push_str(&format!(
         "path = {}\n",
         toml_quote(workspace_path.to_string_lossy().as_ref())
     ));
+    out.push('\n');
+    out.push_str("[runtime_profiles.default.thinking]\n");
+    out.push_str("default_level = \"off\"\n");
+    out.push_str("native_thinking = false\n");
 
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent)?;
@@ -338,6 +346,178 @@ fn append_provider_toml_to_string(
 fn append_telegram_toml_to_string(entry: &Value, alias: &str) -> Option<(String, String)> {
     let mut out = String::new();
     append_telegram_toml(&mut out, entry, alias).map(|reference| (reference, out))
+}
+
+fn morneven_translated_files(entry: &Value) -> Vec<Value> {
+    entry
+        .get("zeroclaw")
+        .and_then(|zeroclaw| zeroclaw.get("canonicalFiles"))
+        .and_then(Value::as_array)
+        .filter(|files| !files.is_empty())
+        .cloned()
+        .or_else(|| entry.get("files").and_then(Value::as_array).cloned())
+        .unwrap_or_default()
+}
+
+fn morneven_cron_jobs(entry: &Value) -> Vec<Value> {
+    entry
+        .get("zeroclaw")
+        .and_then(|zeroclaw| zeroclaw.get("cron"))
+        .and_then(|cron| cron.get("jobs"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn toml_string_array(values: &[String]) -> String {
+    format!(
+        "[{}]",
+        values
+            .iter()
+            .map(|value| toml_quote(value))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn append_optional_toml_string(out: &mut String, key: &str, value: Option<&str>) {
+    if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+        out.push_str(&format!("{key} = {}\n", toml_quote(value)));
+    }
+}
+
+fn append_morneven_cron_toml(out: &mut String, entry: &Value) -> Vec<String> {
+    let mut aliases = Vec::new();
+    for job in morneven_cron_jobs(entry) {
+        let Some(schedule) = job.get("schedule").filter(|value| value.is_object()) else {
+            continue;
+        };
+        let raw_id = string_field(&job, "id")
+            .or_else(|| string_field(&job, "alias"))
+            .or_else(|| string_field(&job, "name"))
+            .unwrap_or("morneven-cron");
+        let alias = normalize_slug(raw_id);
+        let job_type = string_field(&job, "jobType")
+            .or_else(|| string_field(&job, "job_type"))
+            .unwrap_or("agent");
+        let command = string_field(&job, "command");
+        let prompt = string_field(&job, "prompt");
+        if job_type == "shell" && command.is_none() {
+            continue;
+        }
+        if job_type != "shell" && prompt.is_none() {
+            continue;
+        }
+
+        let schedule_kind = string_field(schedule, "kind").unwrap_or("cron");
+        let schedule_is_valid = match schedule_kind {
+            "every" => schedule
+                .get("every_ms")
+                .or_else(|| schedule.get("everyMs"))
+                .and_then(Value::as_u64)
+                .is_some(),
+            "at" => string_field(schedule, "at").is_some(),
+            _ => string_field(schedule, "expr")
+                .or_else(|| string_field(schedule, "expression"))
+                .is_some(),
+        };
+        if !schedule_is_valid {
+            continue;
+        }
+
+        out.push_str(&format!("[cron.{alias}]\n"));
+        append_optional_toml_string(out, "name", string_field(&job, "name"));
+        out.push_str(&format!("job_type = {}\n", toml_quote(job_type)));
+        out.push_str(&format!(
+            "enabled = {}\n",
+            job.get("enabled").and_then(Value::as_bool).unwrap_or(true)
+        ));
+        out.push_str(&format!(
+            "uses_memory = {}\n",
+            job.get("usesMemory")
+                .or_else(|| job.get("uses_memory"))
+                .and_then(Value::as_bool)
+                .unwrap_or(true)
+        ));
+        append_optional_toml_string(out, "command", command);
+        append_optional_toml_string(out, "prompt", prompt);
+        append_optional_toml_string(
+            out,
+            "model",
+            string_field(&job, "model")
+                .or_else(|| string_field(&job, "modelId"))
+                .or_else(|| string_field(&job, "model_id")),
+        );
+        append_optional_toml_string(
+            out,
+            "session_target",
+            string_field(&job, "sessionTarget").or_else(|| string_field(&job, "session_target")),
+        );
+        let allowed_tools = string_array_field(&job, "allowedTools");
+        let allowed_tools = if allowed_tools.is_empty() {
+            string_array_field(&job, "allowed_tools")
+        } else {
+            allowed_tools
+        };
+        if !allowed_tools.is_empty() {
+            out.push_str(&format!(
+                "allowed_tools = {}\n",
+                toml_string_array(&allowed_tools)
+            ));
+        }
+        out.push('\n');
+
+        out.push_str(&format!("[cron.{alias}.schedule]\n"));
+        out.push_str(&format!("kind = {}\n", toml_quote(schedule_kind)));
+        match schedule_kind {
+            "every" => {
+                if let Some(every_ms) = schedule
+                    .get("every_ms")
+                    .or_else(|| schedule.get("everyMs"))
+                    .and_then(Value::as_u64)
+                {
+                    out.push_str(&format!("every_ms = {every_ms}\n"));
+                }
+            }
+            "at" => append_optional_toml_string(out, "at", string_field(schedule, "at")),
+            _ => {
+                append_optional_toml_string(
+                    out,
+                    "expr",
+                    string_field(schedule, "expr").or_else(|| string_field(schedule, "expression")),
+                );
+                append_optional_toml_string(
+                    out,
+                    "tz",
+                    string_field(schedule, "tz").or_else(|| string_field(schedule, "timezone")),
+                );
+            }
+        }
+        out.push('\n');
+
+        if let Some(delivery) = job.get("delivery").filter(|value| value.is_object()) {
+            out.push_str(&format!("[cron.{alias}.delivery]\n"));
+            append_optional_toml_string(out, "mode", string_field(delivery, "mode"));
+            append_optional_toml_string(out, "channel", string_field(delivery, "channel"));
+            append_optional_toml_string(out, "to", string_field(delivery, "to"));
+            append_optional_toml_string(
+                out,
+                "thread_id",
+                string_field(delivery, "threadId").or_else(|| string_field(delivery, "thread_id")),
+            );
+            out.push_str(&format!(
+                "best_effort = {}\n\n",
+                delivery
+                    .get("bestEffort")
+                    .or_else(|| delivery.get("best_effort"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true)
+            ));
+        }
+
+        aliases.push(alias);
+    }
+    aliases
 }
 
 fn load_runtime_state() -> Value {
@@ -722,6 +902,7 @@ fn write_runtime_config(
         "channels": entry.get("channels").cloned().unwrap_or_else(|| json!({})),
         "settings": entry.get("settings").cloned().unwrap_or_else(|| json!({})),
         "generalConfig": general_config,
+        "zeroclaw": entry.get("zeroclaw").cloned().unwrap_or_else(|| json!({})),
         "agents": {
             "defaults": {
                 "workspace": workspace_path.to_string_lossy(),
@@ -754,7 +935,7 @@ fn materialize_runtime_entry(
     let mut written = BTreeMap::new();
     let mut written_paths = HashSet::new();
 
-    let files = entry.get("files").and_then(Value::as_array).cloned().unwrap_or_default();
+    let files = morneven_translated_files(entry);
     for file in files {
         let path = string_field(&file, "path").unwrap_or_default();
         if path.is_empty() {
@@ -2289,6 +2470,84 @@ mod tests {
             "schema_version = {}\n",
             zeroclaw_config::migration::CURRENT_SCHEMA_VERSION
         )));
+    }
+
+    #[test]
+    fn morneven_runtime_toml_includes_zeroclaw_cron_and_reasoning_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let workspace_path = dir.path().join("workspace");
+        let entry = json!({
+            "identity": {
+                "slug": "sora"
+            },
+            "credentials": {
+                "deepseek": {
+                    "apiKey": "sk-test",
+                    "modelId": "deepseek-chat"
+                }
+            },
+            "zeroclaw": {
+                "cron": {
+                    "jobs": [{
+                        "id": "daily-dream",
+                        "name": "Daily Dream",
+                        "jobType": "agent",
+                        "enabled": true,
+                        "prompt": "Dream now",
+                        "schedule": {
+                            "kind": "cron",
+                            "expr": "0 9 * * *",
+                            "tz": "Asia/Singapore"
+                        },
+                        "delivery": {
+                            "mode": "announce",
+                            "channel": "telegram",
+                            "to": "-100"
+                        }
+                    }]
+                }
+            }
+        });
+
+        write_zeroclaw_toml_config(&config_path, &entry, &workspace_path, 18080).unwrap();
+        let toml = std::fs::read_to_string(config_path).unwrap();
+
+        assert!(toml.contains("[cron.daily-dream]"));
+        assert!(toml.contains("job_type = \"agent\""));
+        assert!(toml.contains("prompt = \"Dream now\""));
+        assert!(toml.contains("[cron.daily-dream.schedule]"));
+        assert!(toml.contains("expr = \"0 9 * * *\""));
+        assert!(toml.contains("[cron.daily-dream.delivery]"));
+        assert!(toml.contains("cron_jobs = [\"daily-dream\"]"));
+        assert!(toml.contains("[runtime_profiles.default.thinking]"));
+        assert!(toml.contains("default_level = \"off\""));
+        assert!(toml.contains("native_thinking = false"));
+    }
+
+    #[test]
+    fn morneven_materializer_prefers_zeroclaw_canonical_files() {
+        let entry = json!({
+            "files": [{
+                "path": "agents.md",
+                "content": "legacy agents"
+            }],
+            "zeroclaw": {
+                "canonicalFiles": [{
+                    "path": "AGENTS.md",
+                    "content": "canonical agents"
+                }, {
+                    "path": "MEMORY.md",
+                    "content": "memory"
+                }]
+            }
+        });
+
+        let files = morneven_translated_files(&entry);
+
+        assert_eq!(files.len(), 2);
+        assert_eq!(string_field(&files[0], "path"), Some("AGENTS.md"));
+        assert_eq!(string_field(&files[0], "content"), Some("canonical agents"));
     }
 
     #[test]
