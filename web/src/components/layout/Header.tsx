@@ -16,6 +16,7 @@ const routeTitles: Record<string, string> = {
   '/logs': 'nav.logs',
   '/doctor': 'nav.doctor',
   '/quickstart': 'nav.quickstart',
+  '/morneven': 'nav.morneven',
 };
 
 interface HeaderProps {

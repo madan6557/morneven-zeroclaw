@@ -201,6 +201,297 @@ export function getStatus(): Promise<StatusResponse> {
   return apiFetch<StatusResponse>("/api/status");
 }
 
+const MORNEVEN_TOKEN_KEY = "zeroclaw-morneven-reload-token";
+
+export type MornevenRuntimeAction = "start" | "stop" | "restart";
+
+export interface MornevenRuntimeStatus {
+  state: string;
+  identityId: string;
+  name: string;
+  pid: number | null;
+  uptime: number | null;
+  startedAt: string | null;
+  restart_count?: number;
+  gatewayPort: number | null;
+  telegramBotUsername?: string | null;
+  telegramTokenFingerprint?: string | null;
+  lastError?: string | null;
+  lastExitCode?: number | null;
+  desiredState?: string;
+  autoRestartEnabled?: boolean;
+  lastUnplannedExitAt?: string | null;
+  lastRestartAt?: string | null;
+  lastLogLine?: string | null;
+  slug?: string;
+  isMain?: boolean;
+  workspacePath?: string;
+  provider?: unknown;
+  enabledChannels?: string[];
+}
+
+export interface MornevenMaterializedRuntime {
+  identityId: string;
+  slug?: string;
+  name?: string;
+  roleTitle?: string;
+  isMain?: boolean;
+  runtimePath?: string;
+  workspacePath?: string;
+  configPath?: string;
+  zeroclawConfigPath?: string;
+  gatewayPort?: number;
+  autoDreamEnabled?: boolean;
+  legacyNanobotFileCount?: number;
+  fileCount?: number;
+  files?: string[];
+  provider?: unknown;
+  enabledChannels?: string[];
+  syncedAt?: string;
+}
+
+export interface MornevenGatewayStatus {
+  state: string;
+  running: number;
+  stopped: number;
+  runtimeCount: number;
+  identityId: string;
+  name: string;
+  pid: number | null;
+  uptime: number | null;
+  startedAt: string | null;
+  runtimes: MornevenRuntimeStatus[];
+  desiredState?: string;
+  autoRestartEnabled?: boolean;
+  logs?: string[];
+}
+
+export interface MornevenRuntimeState {
+  syncedAt?: string;
+  mode?: string;
+  runtimeCount?: number;
+  fileCount?: number;
+  runtimes?: MornevenMaterializedRuntime[];
+  files?: string[];
+  mainIdentity?: {
+    id?: string;
+    slug?: string;
+    name?: string;
+    roleTitle?: string;
+  };
+}
+
+export interface MornevenStatusResponse {
+  ok: boolean;
+  gateway: MornevenGatewayStatus;
+  morneven?: MornevenRuntimeState;
+  logs?: string[];
+  error?: string;
+}
+
+export interface MornevenWorkspaceChange {
+  path: string;
+  kind?: string;
+  size?: number;
+  updatedAt?: string | null;
+}
+
+export interface MornevenWorkspaceRuntime {
+  identityId: string;
+  identity?: {
+    id?: string;
+    slug?: string;
+    name?: string;
+  };
+  syncedAt?: string;
+  changedCount?: number;
+  changes?: MornevenWorkspaceChange[];
+  skipped?: Array<{ path: string; reason: string }>;
+}
+
+export interface MornevenWorkspaceChangesResponse {
+  ok: boolean;
+  runtimes: MornevenWorkspaceRuntime[];
+}
+
+export interface MornevenTelegramTopicsRuntime {
+  identityId: string;
+  identity?: {
+    id?: string;
+    slug?: string;
+    name?: string;
+  };
+  groups?: unknown[];
+}
+
+export interface MornevenTelegramTopicsResponse {
+  ok: boolean;
+  runtimes: MornevenTelegramTopicsRuntime[];
+}
+
+export interface MornevenProviderUsageEvent {
+  eventId?: string;
+  provider?: string;
+  runtimeId?: string;
+  identityId?: string;
+  runtimeName?: string;
+  model?: string;
+  modelId?: string;
+  sessionKey?: string | null;
+  recordedAt?: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  cachedTokens?: number;
+  totalTokens?: number;
+  requestCount?: number;
+  usage?: {
+    cost_usd?: number;
+    cost?: number;
+    total_tokens?: number;
+  };
+  error?: string | null;
+}
+
+export interface MornevenProviderUsageResponse {
+  ok: boolean;
+  count: number;
+  events: MornevenProviderUsageEvent[];
+}
+
+export function getMornevenToken(): string {
+  try {
+    return localStorage.getItem(MORNEVEN_TOKEN_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+export function saveMornevenToken(token: string): void {
+  try {
+    localStorage.setItem(MORNEVEN_TOKEN_KEY, token);
+  } catch {
+    // Ignore storage errors.
+  }
+}
+
+export function clearMornevenToken(): void {
+  try {
+    localStorage.removeItem(MORNEVEN_TOKEN_KEY);
+  } catch {
+    // Ignore storage errors.
+  }
+}
+
+async function mornevenFetch<T = unknown>(
+  path: string,
+  options: RequestInit = {},
+  token = getMornevenToken(),
+): Promise<T> {
+  const headers = new Headers(options.headers);
+  if (token) {
+    headers.set("x-morneven-reload-token", token);
+  }
+  if (
+    options.body &&
+    typeof options.body === "string" &&
+    !headers.has("Content-Type")
+  ) {
+    headers.set("Content-Type", "application/json");
+  }
+
+  const response = await fetch(`${apiOrigin}${basePath}${path}`, {
+    ...options,
+    headers,
+  });
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`Morneven API ${response.status}: ${text || response.statusText}`);
+  }
+  if (response.status === 204) {
+    return undefined as T;
+  }
+  return response.json() as Promise<T>;
+}
+
+export function getMornevenStatus(token?: string): Promise<MornevenStatusResponse> {
+  return mornevenFetch<MornevenStatusResponse>("/api/morneven/status", {}, token);
+}
+
+export function reloadMornevenBundle(
+  restartGateway = false,
+  token?: string,
+): Promise<MornevenStatusResponse> {
+  return mornevenFetch<MornevenStatusResponse>(
+    "/api/morneven/reload",
+    {
+      method: "POST",
+      body: JSON.stringify({ restartGateway }),
+    },
+    token,
+  );
+}
+
+export function runMornevenGatewayAction(
+  action: MornevenRuntimeAction,
+  token?: string,
+): Promise<MornevenStatusResponse> {
+  return mornevenFetch<MornevenStatusResponse>(
+    `/api/morneven/gateway/${encodeURIComponent(action)}`,
+    { method: "POST" },
+    token,
+  );
+}
+
+export function runMornevenRuntimeAction(
+  identityId: string,
+  action: MornevenRuntimeAction,
+  token?: string,
+): Promise<MornevenStatusResponse> {
+  return mornevenFetch<MornevenStatusResponse>(
+    `/api/morneven/runtimes/${encodeURIComponent(identityId)}/gateway/${encodeURIComponent(action)}`,
+    { method: "POST" },
+    token,
+  );
+}
+
+export function getMornevenWorkspaceChanges(
+  includeAll = false,
+  token?: string,
+): Promise<MornevenWorkspaceChangesResponse> {
+  const qs = includeAll ? "?include_all=true" : "";
+  return mornevenFetch<MornevenWorkspaceChangesResponse>(
+    `/api/morneven/workspace/changes${qs}`,
+    {},
+    token,
+  );
+}
+
+export function getMornevenTelegramTopics(
+  token?: string,
+): Promise<MornevenTelegramTopicsResponse> {
+  return mornevenFetch<MornevenTelegramTopicsResponse>(
+    "/api/morneven/telegram/topics",
+    {},
+    token,
+  );
+}
+
+export function getMornevenProviderUsage(
+  from?: Date,
+  to?: Date,
+  token?: string,
+): Promise<MornevenProviderUsageResponse> {
+  const params = new URLSearchParams();
+  if (from) params.set("from", from.toISOString());
+  if (to) params.set("to", to.toISOString());
+  const qs = params.toString();
+  return mornevenFetch<MornevenProviderUsageResponse>(
+    `/api/morneven/provider-usage${qs ? `?${qs}` : ""}`,
+    {},
+    token,
+  );
+}
+
 export function getHealth(): Promise<HealthSnapshot> {
   return apiFetch<HealthSnapshot | { health: HealthSnapshot }>(
     "/api/health",

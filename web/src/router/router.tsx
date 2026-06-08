@@ -12,6 +12,7 @@ import {
   Doctor,
   Integrations,
   Logs,
+  MornevenBotManager,
   Pairing,
   Quickstart,
   Tools,
@@ -50,6 +51,7 @@ export const Router = () => (
         <Route path="/doctor" element={<Doctor />} />
         <Route path="/pairing" element={<Pairing />} />
         <Route path="/canvas" element={<Canvas />} />
+        <Route path="/morneven" element={<MornevenBotManager />} />
         <Route path="/quickstart" element={<Quickstart />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
