@@ -38,6 +38,12 @@ pub struct ProviderUsageQuery {
     to: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct WorkspaceChangesQuery {
+    #[serde(rename = "includeAll")]
+    include_all: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 struct DesiredRuntimeState {
     identity_id: String,
@@ -367,6 +373,182 @@ fn morneven_translated_files(entry: &Value) -> Vec<Value> {
         .cloned()
         .or_else(|| entry.get("files").and_then(Value::as_array).cloned())
         .unwrap_or_default()
+}
+
+fn nanobot_legacy_root_candidates() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for key in ["MORNEVEN_NANOBOT_LEGACY_ROOT", "NANOBOT_LEGACY_ROOT"] {
+        if let Ok(path) = env::var(key) {
+            let trimmed = path.trim();
+            if !trimmed.is_empty() {
+                roots.push(PathBuf::from(trimmed));
+            }
+        }
+    }
+    if let Some(parent) = runtime_root().parent() {
+        roots.push(parent.join("legacy").join("nanobot"));
+    }
+    roots.push(PathBuf::from("/data/.nanobot"));
+
+    let mut unique = Vec::new();
+    for root in roots {
+        if !unique.iter().any(|existing| existing == &root) {
+            unique.push(root);
+        }
+    }
+    unique
+}
+
+fn legacy_nanobot_runtime_dirs(identity: &Value) -> Vec<PathBuf> {
+    let slug = runtime_slug(identity);
+    let safe_id = normalize_slug(string_field(identity, "id").unwrap_or(&slug));
+    let suffix: String = safe_id.chars().take(8).collect();
+    let runtime_dir_name = format!("{slug}-{suffix}");
+    let mut dirs = Vec::new();
+    for root in nanobot_legacy_root_candidates() {
+        if root.join("workspace").is_dir() {
+            dirs.push(root);
+            continue;
+        }
+        let runtimes_root = if root.file_name().and_then(|name| name.to_str()) == Some("runtimes") {
+            root
+        } else {
+            root.join("runtimes")
+        };
+        dirs.push(runtimes_root.join(&runtime_dir_name));
+    }
+    dirs
+}
+
+fn canonicalize_legacy_nanobot_path(relative_path: &str) -> String {
+    let normalized = relative_path.trim().replace('\\', "/").trim_start_matches('/').to_string();
+    let lower = normalized.to_ascii_lowercase();
+    if lower.starts_with("sessions/") {
+        return format!("legacy/nanobot/{normalized}");
+    }
+    match lower.as_str() {
+        "agents.md" => "AGENTS.md".to_string(),
+        "soul.md" => "SOUL.md".to_string(),
+        "identity.md" => "IDENTITY.md".to_string(),
+        "user.md" => "USER.md".to_string(),
+        "tools.md" => "TOOLS.md".to_string(),
+        "heartbeat.md" => "HEARTBEAT.md".to_string(),
+        "bootstrap.md" => "BOOTSTRAP.md".to_string(),
+        "memory.md" => "MEMORY.md".to_string(),
+        "lore.md" => "LORE.md".to_string(),
+        _ => normalized,
+    }
+}
+
+fn legacy_nanobot_workspace_files(identity: &Value) -> Vec<Value> {
+    let mut files = BTreeMap::new();
+    for runtime_dir in legacy_nanobot_runtime_dirs(identity) {
+        let workspace_path = runtime_dir.join("workspace");
+        if !workspace_path.is_dir() {
+            continue;
+        }
+        let mut stack = vec![workspace_path.clone()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if !path.is_file() {
+                    continue;
+                }
+                let Some(relative_path) = path
+                    .strip_prefix(&workspace_path)
+                    .ok()
+                    .and_then(|path| path.to_str())
+                    .map(|path| path.replace('\\', "/"))
+                else {
+                    continue;
+                };
+                let Ok(relative_path) = normalize_runtime_path(&relative_path) else {
+                    continue;
+                };
+                let runtime_path = canonicalize_legacy_nanobot_path(&relative_path);
+                let Ok(runtime_path) = normalize_runtime_path(&runtime_path) else {
+                    continue;
+                };
+                let Ok((content, stat)) = read_workspace_text(&path) else {
+                    continue;
+                };
+                let updated_at = stat
+                    .modified()
+                    .ok()
+                    .map(DateTime::<Utc>::from)
+                    .map(|time| time.to_rfc3339())
+                    .unwrap_or_else(now_iso);
+                let content_type =
+                    if runtime_path.ends_with(".json") || runtime_path.ends_with(".jsonl") {
+                        "application/json"
+                    } else {
+                        "text/markdown"
+                    };
+                let kind = infer_workspace_kind(&runtime_path);
+                let object_path = format!("legacy-nanobot://{}", relative_path);
+                let file_id = format!("legacy-nanobot-{}", content_hash(relative_path.as_bytes()));
+                files.insert(
+                    runtime_path.to_ascii_lowercase(),
+                    json!({
+                        "id": file_id,
+                        "path": runtime_path,
+                        "kind": kind,
+                        "contentType": content_type,
+                        "objectPath": object_path,
+                        "sourcePath": relative_path,
+                        "size": content.len(),
+                        "updatedAt": updated_at,
+                        "content": content
+                    }),
+                );
+            }
+        }
+    }
+    files.into_values().collect()
+}
+
+fn is_generated_zeroclaw_file(file: &Value) -> bool {
+    string_field(file, "id")
+        .is_some_and(|id| id.starts_with("zeroclaw-managed-"))
+        || string_field(file, "objectPath")
+            .is_some_and(|path| path.starts_with("zeroclaw-managed://"))
+}
+
+fn merge_runtime_materialization_files(
+    legacy_files: Vec<Value>,
+    bundle_files: Vec<Value>,
+) -> Vec<Value> {
+    let mut files = BTreeMap::new();
+    for file in legacy_files {
+        if let Some(path) = string_field(&file, "path") {
+            files.insert(path.to_ascii_lowercase(), file);
+        }
+    }
+    for file in bundle_files {
+        let Some(path) = string_field(&file, "path") else {
+            continue;
+        };
+        let key = path.to_ascii_lowercase();
+        if files.contains_key(&key) && is_generated_zeroclaw_file(&file) {
+            continue;
+        }
+        files.insert(key, file);
+    }
+    files.into_values().collect()
+}
+
+fn runtime_files_for_materialization(entry: &Value, identity: &Value) -> Vec<Value> {
+    merge_runtime_materialization_files(
+        legacy_nanobot_workspace_files(identity),
+        morneven_translated_files(entry),
+    )
 }
 
 fn morneven_cron_jobs(entry: &Value) -> Vec<Value> {
@@ -945,7 +1127,14 @@ fn materialize_runtime_entry(
     let mut written = BTreeMap::new();
     let mut written_paths = HashSet::new();
 
-    let files = morneven_translated_files(entry);
+    let files = runtime_files_for_materialization(entry, &identity);
+    let legacy_nanobot_file_count = files
+        .iter()
+        .filter(|file| {
+            string_field(file, "objectPath")
+                .is_some_and(|path| path.starts_with("legacy-nanobot://"))
+        })
+        .count();
     for file in files {
         let path = string_field(&file, "path").unwrap_or_default();
         if path.is_empty() {
@@ -1021,6 +1210,7 @@ fn materialize_runtime_entry(
         "telegramTokenFingerprint": telegram_token_fingerprint(entry),
         "telegramActiveBotUsernames": [],
         "autoDreamEnabled": auto_dream_enabled(entry),
+        "legacyNanobotFileCount": legacy_nanobot_file_count,
         "fileCount": files.len(),
         "files": files,
         "provider": credential_provider(entry),
@@ -1735,7 +1925,7 @@ fn read_workspace_text(path: &Path) -> io::Result<(String, fs::Metadata)> {
     Ok((content, stat))
 }
 
-fn workspace_changes_at(workspace_root: &Path, manifest_path: &Path) -> Value {
+fn workspace_changes_at(workspace_root: &Path, manifest_path: &Path, include_all: bool) -> Value {
     let manifest = load_manifest(manifest_path);
     let mut changes = Vec::new();
     let mut skipped = Vec::new();
@@ -1771,7 +1961,7 @@ fn workspace_changes_at(workspace_root: &Path, manifest_path: &Path) -> Value {
                 Ok((content, stat)) => {
                     let hash = content_hash(content.as_bytes());
                     let base_hash = manifest.files.get(&relative_path).map(|file| file.content_hash.clone());
-                    if base_hash.as_deref() == Some(hash.as_str()) {
+                    if !include_all && base_hash.as_deref() == Some(hash.as_str()) {
                         continue;
                     }
                     let updated_at = stat
@@ -2173,10 +2363,23 @@ pub async fn handle_config_secrets(headers: HeaderMap) -> Response {
     response(StatusCode::OK, json!({"ok": true, "runtimes": runtimes}))
 }
 
-pub async fn handle_workspace_changes(headers: HeaderMap) -> Response {
+pub async fn handle_workspace_changes(
+    headers: HeaderMap,
+    Query(query): Query<WorkspaceChangesQuery>,
+) -> Response {
     if let Err(error) = require_morneven_token(&headers) {
         return error;
     }
+    let include_all = query
+        .include_all
+        .as_deref()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "all"
+            )
+        })
+        .unwrap_or(false);
     let state = load_runtime_state();
     let runtimes: Vec<Value> = state
         .get("runtimes")
@@ -2188,7 +2391,7 @@ pub async fn handle_workspace_changes(headers: HeaderMap) -> Response {
                     let workspace = PathBuf::from(string_field(runtime, "workspacePath").unwrap_or_default());
                     let manifest = PathBuf::from(string_field(runtime, "runtimePath").unwrap_or_default())
                         .join(".morneven-runtime-manifest.json");
-                    let changes = workspace_changes_at(&workspace, &manifest);
+                    let changes = workspace_changes_at(&workspace, &manifest, include_all);
                     let mut payload = value_object(&changes).cloned().unwrap_or_default();
                     payload.insert(
                         "identityId".to_string(),
@@ -2586,6 +2789,48 @@ mod tests {
         assert_eq!(files.len(), 2);
         assert_eq!(string_field(&files[0], "path"), Some("AGENTS.md"));
         assert_eq!(string_field(&files[0], "content"), Some("canonical agents"));
+    }
+
+    #[test]
+    fn morneven_materializer_keeps_legacy_nanobot_over_generated_defaults() {
+        let legacy = vec![json!({
+            "path": "AGENTS.md",
+            "content": "legacy nanobot agents",
+            "objectPath": "legacy-nanobot://AGENTS.md"
+        })];
+        let generated = vec![json!({
+            "id": "zeroclaw-managed-agents.md",
+            "path": "AGENTS.md",
+            "content": "generated default agents",
+            "objectPath": "zeroclaw-managed://sora/AGENTS.md"
+        })];
+
+        let files = merge_runtime_materialization_files(legacy, generated);
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(string_field(&files[0], "path"), Some("AGENTS.md"));
+        assert_eq!(string_field(&files[0], "content"), Some("legacy nanobot agents"));
+    }
+
+    #[test]
+    fn morneven_materializer_prefers_explicit_bundle_over_legacy_nanobot() {
+        let legacy = vec![json!({
+            "path": "AGENTS.md",
+            "content": "legacy nanobot agents",
+            "objectPath": "legacy-nanobot://AGENTS.md"
+        })];
+        let explicit = vec![json!({
+            "id": "bot-manager-file",
+            "path": "AGENTS.md",
+            "content": "bot manager agents",
+            "objectPath": "bot-manager/workspace/sora/AGENTS.md"
+        })];
+
+        let files = merge_runtime_materialization_files(legacy, explicit);
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(string_field(&files[0], "path"), Some("AGENTS.md"));
+        assert_eq!(string_field(&files[0], "content"), Some("bot manager agents"));
     }
 
     #[test]
