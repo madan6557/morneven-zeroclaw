@@ -2603,6 +2603,142 @@ fn strip_think_tags_inline(s: &str) -> String {
     result.trim().to_string()
 }
 
+fn looks_like_visible_reasoning_preamble(text: &str) -> bool {
+    let lower = text
+        .trim_start()
+        .chars()
+        .take(1200)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    const MARKERS: &[&str] = &[
+        "the user is asking",
+        "user is asking",
+        "the user asked",
+        "the user wants",
+        "user wants",
+        "the question is",
+        "this likely refers",
+        "okay, i need",
+        "i need to answer",
+        "let me check",
+        "let me search",
+        "let me look",
+        "i need to check",
+        "i should check",
+        "i will check",
+        "i'll check",
+        "i'm going to",
+        "we need to",
+        "let's analyze",
+        "looking at the",
+        "actually, looking",
+        "so the user",
+        "from the memory context",
+        "the memory context",
+        "based on the memory",
+        "i found",
+    ];
+    MARKERS.iter().any(|marker| lower.starts_with(marker))
+}
+
+fn visible_answer_start(text: &str) -> Option<usize> {
+    let lower = text.to_ascii_lowercase();
+    const MARKERS: &[&str] = &[
+        "\noh, ",
+        "\njawabannya",
+        "\nintinya",
+        "\ndetailnya:",
+        "\naturannya",
+        "\nbot interaction rules:",
+        "\nmax exchange",
+        "\noke",
+        "\nbaik",
+        "\nuntuk ",
+        "\njadi ",
+        "\nfinal answer:",
+        "\nanswer:",
+    ];
+
+    MARKERS
+        .iter()
+        .filter_map(|marker| {
+            lower
+                .find(marker)
+                .map(|pos| pos + if marker.starts_with('\n') { 1 } else { 0 })
+        })
+        .min()
+}
+
+fn reasoning_paragraph_prefix(paragraph: &str) -> bool {
+    let lower = paragraph.trim_start().to_ascii_lowercase();
+    const PREFIXES: &[&str] = &[
+        "the user is asking",
+        "user is asking",
+        "the user asked",
+        "the user wants",
+        "user wants",
+        "the question is",
+        "this likely refers",
+        "okay, i need",
+        "let me ",
+        "i need to ",
+        "i should ",
+        "i will ",
+        "i'll ",
+        "i'm going to",
+        "we need to",
+        "let's analyze",
+        "looking at ",
+        "actually, ",
+        "so the user",
+        "from the memory context",
+        "the memory context",
+        "based on ",
+        "i found ",
+    ];
+    PREFIXES.iter().any(|prefix| lower.starts_with(prefix))
+}
+
+fn strip_visible_reasoning_preamble(message: &str) -> String {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if !looks_like_visible_reasoning_preamble(trimmed) {
+        return trimmed.to_string();
+    }
+    if let Some(start) = visible_answer_start(trimmed) {
+        return trimmed[start..].trim_start().to_string();
+    }
+
+    let mut kept = Vec::new();
+    let mut dropping = true;
+    for paragraph in trimmed.split("\n\n") {
+        let paragraph = paragraph.trim();
+        if paragraph.is_empty() {
+            continue;
+        }
+        if dropping && reasoning_paragraph_prefix(paragraph) {
+            continue;
+        }
+        dropping = false;
+        kept.push(paragraph);
+    }
+
+    kept.join("\n\n").trim().to_string()
+}
+
+fn strip_visible_reasoning_preamble_for_draft(message: &str) -> String {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if looks_like_visible_reasoning_preamble(trimmed) && visible_answer_start(trimmed).is_none() {
+        return String::new();
+    }
+    strip_visible_reasoning_preamble(trimmed)
+}
+
 fn starts_with_visible_tool_call_tag_example(response: &str) -> bool {
     let lower = response.trim_start().to_ascii_lowercase();
     let starts_with_tool_tag = lower.starts_with("<tool_call")
@@ -2675,7 +2811,7 @@ fn sanitize_channel_response(response: &str, tools: &[Box<dyn Tool>]) -> String 
     let stripped_json =
         strip_isolated_tool_json_artifacts(&stripped_fenced_json, &known_tool_names);
     // Strip leading narration lines that announce tool usage
-    let sanitized = strip_tool_narration(&stripped_json);
+    let sanitized = strip_visible_reasoning_preamble(&strip_tool_narration(&stripped_json));
 
     // Scan for credential leaks before returning to caller
     match zeroclaw_runtime::security::LeakDetector::new().scan(&sanitized) {
@@ -3927,7 +4063,9 @@ async fn process_channel_message_body(
                         }
                         StreamDelta::Text(text) => {
                             accumulated.push_str(&text);
-                            let visible = strip_think_tags_inline(&accumulated);
+                            let visible = strip_visible_reasoning_preamble_for_draft(
+                                &strip_think_tags_inline(&accumulated),
+                            );
                             if let Err(e) = channel
                                 .update_draft(&reply_target, &draft_id, &visible)
                                 .await
@@ -13609,6 +13747,23 @@ BTC is currently around $65,000 based on latest tool output."#
     }
 
     #[test]
+    fn prompt_injects_morneven_policy_before_workspace_identity_files() {
+        let ws = make_workspace();
+        std::fs::write(
+            ws.path().join("MORNEVEN_POLICY.md"),
+            "# Morneven Runtime Policy\n\nBot Manager global rules win.",
+        )
+        .unwrap();
+
+        let prompt = build_system_prompt(ws.path(), "test-model", &[], &[], None, None);
+        let policy_idx = prompt.find("### MORNEVEN_POLICY.md").unwrap();
+        let agents_idx = prompt.find("### AGENTS.md").unwrap();
+
+        assert!(policy_idx < agents_idx);
+        assert!(prompt.contains("Bot Manager global rules win."));
+    }
+
+    #[test]
     fn prompt_injects_tools() {
         let ws = make_workspace();
         let tools = vec![
@@ -17510,6 +17665,19 @@ This is an example JSON object for profile settings."#;
         let result = sanitize_channel_response(clean_text, &tools);
 
         assert_eq!(result, clean_text);
+    }
+
+    #[test]
+    fn sanitize_channel_response_strips_visible_reasoning_preamble() {
+        let tools: Vec<Box<dyn Tool>> = Vec::new();
+        let leaked = "The user is asking about the max exchange rule. This likely refers to memory.\n\nLet me check my memory and available files.\n\nOh, itu max 3 exchange. Detailnya:\n\nBot Interaction Rules:\n- 1 bubble per delivery.";
+
+        let result = sanitize_channel_response(leaked, &tools);
+
+        assert!(result.starts_with("Oh, itu max 3 exchange."));
+        assert!(result.contains("Bot Interaction Rules:"));
+        assert!(!result.contains("The user is asking"));
+        assert!(!result.contains("Let me check"));
     }
 
     #[test]
