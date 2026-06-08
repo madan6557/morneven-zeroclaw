@@ -24,6 +24,27 @@ NANOBOT_MORNEVEN_RELOAD_TOKEN=<shared secret>
 Railway private networking must use `http://<private-domain>:<port>`, not
 `https://`.
 
+For one-time Nanobot workspace inheritance, Bot Manager can also point to the
+old Nanobot service while the primary URL points to ZeroClaw:
+
+```text
+NANOBOT_LEGACY_INTERNAL_BASE_URL=http://<old-nanobot-private-domain>:8080
+NANOBOT_LEGACY_MORNEVEN_RELOAD_TOKEN=<optional old shared secret>
+```
+
+If the old Nanobot volume is copied into the ZeroClaw service instead, set one
+of these on ZeroClaw:
+
+```text
+MORNEVEN_NANOBOT_LEGACY_ROOT=/data/.nanobot
+NANOBOT_LEGACY_ROOT=/data/.nanobot
+```
+
+The importer reads `runtimes/<slug>-<identity8>/workspace`, maps Nanobot root
+files to ZeroClaw canonical names, archives old `sessions/` under
+`legacy/nanobot/sessions/`, and lets explicit Bot Manager files override legacy
+content.
+
 ## Compatibility Contract
 
 The fork exposes the same protected Morneven API shape that Bot Manager already
