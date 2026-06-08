@@ -2614,6 +2614,10 @@ fn looks_like_visible_reasoning_preamble(text: &str) -> bool {
         "the user is asking",
         "user is asking",
         "the user asked",
+        "the user is saying",
+        "user is saying",
+        "the user says",
+        "user says",
         "the user wants",
         "user wants",
         "the question is",
@@ -2651,12 +2655,20 @@ fn visible_answer_start(text: &str) -> Option<usize> {
         "\naturannya",
         "\nbot interaction rules:",
         "\nmax exchange",
+        "\nbenar,",
+        "\nbenar ",
         "\noke",
         "\nbaik",
+        "\nini dia",
         "\nuntuk ",
         "\njadi ",
         "\nfinal answer:",
         "\nanswer:",
+        "benar,",
+        "benar ",
+        "oke,",
+        "baik,",
+        "ini dia",
     ];
 
     MARKERS
@@ -2675,6 +2687,10 @@ fn reasoning_paragraph_prefix(paragraph: &str) -> bool {
         "the user is asking",
         "user is asking",
         "the user asked",
+        "the user is saying",
+        "user is saying",
+        "the user says",
+        "user says",
         "the user wants",
         "user wants",
         "the question is",
@@ -13754,13 +13770,21 @@ BTC is currently around $65,000 based on latest tool output."#
             "# Morneven Runtime Policy\n\nBot Manager global rules win.",
         )
         .unwrap();
+        std::fs::write(
+            ws.path().join("MORNEVEN_CRON.md"),
+            "# Morneven Cron Jobs\n\n- usd-idr-siang",
+        )
+        .unwrap();
 
         let prompt = build_system_prompt(ws.path(), "test-model", &[], &[], None, None);
         let policy_idx = prompt.find("### MORNEVEN_POLICY.md").unwrap();
+        let cron_idx = prompt.find("### MORNEVEN_CRON.md").unwrap();
         let agents_idx = prompt.find("### AGENTS.md").unwrap();
 
         assert!(policy_idx < agents_idx);
+        assert!(cron_idx < agents_idx);
         assert!(prompt.contains("Bot Manager global rules win."));
+        assert!(prompt.contains("usd-idr-siang"));
     }
 
     #[test]
@@ -17670,13 +17694,13 @@ This is an example JSON object for profile settings."#;
     #[test]
     fn sanitize_channel_response_strips_visible_reasoning_preamble() {
         let tools: Vec<Box<dyn Tool>> = Vec::new();
-        let leaked = "The user is asking about the max exchange rule. This likely refers to memory.\n\nLet me check my memory and available files.\n\nOh, itu max 3 exchange. Detailnya:\n\nBot Interaction Rules:\n- 1 bubble per delivery.";
+        let leaked = "The user is saying there should already be a cron job. Let me check files.Benar, sudah ada cron/jobs.json. Detailnya:\n\nBot Interaction Rules:\n- 1 bubble per delivery.";
 
         let result = sanitize_channel_response(leaked, &tools);
 
-        assert!(result.starts_with("Oh, itu max 3 exchange."));
+        assert!(result.starts_with("Benar, sudah ada cron/jobs.json."));
         assert!(result.contains("Bot Interaction Rules:"));
-        assert!(!result.contains("The user is asking"));
+        assert!(!result.contains("The user is saying"));
         assert!(!result.contains("Let me check"));
     }
 

@@ -420,6 +420,95 @@ fn morneven_policy_file(entry: &Value, general_config: &Value) -> Value {
     })
 }
 
+fn morneven_cron_schedule_label(schedule: &Value) -> String {
+    let kind = string_field(schedule, "kind").unwrap_or("cron");
+    match kind {
+        "every" => schedule
+            .get("every_ms")
+            .or_else(|| schedule.get("everyMs"))
+            .and_then(Value::as_u64)
+            .map(|value| format!("every {value} ms"))
+            .unwrap_or_else(|| "every interval".to_string()),
+        "at" => string_field(schedule, "at")
+            .map(|value| format!("at {value}"))
+            .unwrap_or_else(|| "at one-shot time".to_string()),
+        _ => {
+            let expr = string_field(schedule, "expr")
+                .or_else(|| string_field(schedule, "expression"))
+                .unwrap_or("* * * * *");
+            let tz = string_field(schedule, "tz")
+                .or_else(|| string_field(schedule, "timezone"))
+                .unwrap_or("runtime timezone");
+            format!("{expr} ({tz})")
+        }
+    }
+}
+
+fn morneven_cron_delivery_label(job: &Value) -> String {
+    let Some(delivery) = job.get("delivery").filter(|value| value.is_object()) else {
+        return "no delivery configured".to_string();
+    };
+    let channel = string_field(delivery, "channel").unwrap_or("channel not set");
+    let to = string_field(delivery, "to").unwrap_or("recipient not set");
+    let thread = string_field(delivery, "threadId")
+        .or_else(|| string_field(delivery, "thread_id"))
+        .map(|value| format!(" thread {value}"))
+        .unwrap_or_default();
+    format!("{channel} to {to}{thread}")
+}
+
+fn morneven_cron_file(entry: &Value) -> Option<Value> {
+    let jobs = morneven_cron_jobs(entry);
+    if jobs.is_empty() {
+        return None;
+    }
+    let identity = entry.get("identity").cloned().unwrap_or_else(|| json!({}));
+    let identity_slug = string_field(&identity, "slug").unwrap_or("runtime");
+    let mut content = String::from(
+        "# Morneven Cron Jobs\n\n\
+         This read-only summary is generated from Bot Manager cron data. Use it when the user asks what scheduled jobs or routines exist. For live status, use cron_list when available.\n\n",
+    );
+    for job in jobs {
+        let id = string_field(&job, "id")
+            .or_else(|| string_field(&job, "alias"))
+            .unwrap_or("cron-job");
+        let name = string_field(&job, "name").unwrap_or(id);
+        let enabled = job.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+        let job_type = string_field(&job, "jobType")
+            .or_else(|| string_field(&job, "job_type"))
+            .unwrap_or("agent");
+        let schedule_label = job
+            .get("schedule")
+            .map(morneven_cron_schedule_label)
+            .unwrap_or_else(|| "schedule not set".to_string());
+        let prompt = string_field(&job, "prompt")
+            .or_else(|| string_field(&job, "command"))
+            .unwrap_or("");
+        let delivery = morneven_cron_delivery_label(&job);
+        content.push_str(&format!(
+            "## {name}\n\n- ID: `{id}`\n- Enabled: {enabled}\n- Type: {job_type}\n- Schedule: `{schedule_label}`\n- Delivery: {delivery}\n"
+        ));
+        if !prompt.is_empty() {
+            content.push_str(&format!("- Task: {prompt}\n"));
+        }
+        if let Some(source_path) = string_field(&job, "sourcePath") {
+            content.push_str(&format!("- Source: `{source_path}`\n"));
+        }
+        content.push('\n');
+    }
+
+    Some(json!({
+        "id": format!("morneven-cron-{identity_slug}"),
+        "path": "MORNEVEN_CRON.md",
+        "kind": "cron",
+        "contentType": "text/markdown",
+        "objectPath": format!("zeroclaw-managed://{identity_slug}/MORNEVEN_CRON.md"),
+        "size": content.len(),
+        "updatedAt": now_iso(),
+        "content": content
+    }))
+}
+
 fn nanobot_legacy_root_candidates() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     for key in ["MORNEVEN_NANOBOT_LEGACY_ROOT", "NANOBOT_LEGACY_ROOT"] {
@@ -603,6 +692,17 @@ fn runtime_files_for_materialization(
         });
     if !has_policy {
         bundle_files.push(morneven_policy_file(entry, general_config));
+    }
+    let has_cron_summary = bundle_files
+        .iter()
+        .any(|file| {
+            string_field(file, "path")
+                .is_some_and(|path| path.eq_ignore_ascii_case("MORNEVEN_CRON.md"))
+        });
+    if !has_cron_summary
+        && let Some(file) = morneven_cron_file(entry)
+    {
+        bundle_files.push(file);
     }
 
     merge_runtime_materialization_files(
@@ -2918,6 +3018,51 @@ mod tests {
         assert!(content.contains("Always follow Bot Manager global rules."));
         assert!(content.contains("Morneven context."));
         assert!(content.contains("Never expose hidden reasoning"));
+    }
+
+    #[test]
+    fn morneven_runtime_files_include_cron_summary() {
+        let entry = json!({
+            "identity": {
+                "slug": "sola"
+            },
+            "zeroclaw": {
+                "cron": {
+                    "jobs": [{
+                        "id": "usd-idr-siang",
+                        "name": "usd-idr-siang",
+                        "enabled": true,
+                        "jobType": "agent",
+                        "prompt": "Fetch current USD/IDR exchange rate.",
+                        "sourcePath": "cron/jobs.json",
+                        "schedule": {
+                            "kind": "cron",
+                            "expr": "0 12 * * *",
+                            "tz": "Asia/Makassar"
+                        },
+                        "delivery": {
+                            "mode": "announce",
+                            "channel": "telegram.default",
+                            "to": "-1003602779585",
+                            "threadId": "6151"
+                        }
+                    }]
+                },
+                "canonicalFiles": []
+            }
+        });
+        let identity = entry.get("identity").unwrap().clone();
+        let files = runtime_files_for_materialization(&entry, &identity, &json!({}));
+        let cron = files
+            .iter()
+            .find(|file| string_field(file, "path") == Some("MORNEVEN_CRON.md"))
+            .expect("managed cron summary should be materialized");
+        let content = string_field(cron, "content").unwrap_or_default();
+
+        assert!(content.contains("usd-idr-siang"));
+        assert!(content.contains("0 12 * * * (Asia/Makassar)"));
+        assert!(content.contains("telegram.default to -1003602779585 thread 6151"));
+        assert!(content.contains("Fetch current USD/IDR exchange rate."));
     }
 
     #[test]
