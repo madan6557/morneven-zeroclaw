@@ -292,7 +292,7 @@ fn write_zeroclaw_toml_config(
     out.push_str("host = \"127.0.0.1\"\n");
     out.push_str(&format!("port = {gateway_port}\n"));
     out.push_str("require_pairing = false\n\n");
-    out.push_str("[risk_profiles.default]\n\n");
+    append_morneven_risk_profile_toml(&mut out);
     out.push_str("[runtime_profiles.default]\n");
     out.push_str("agentic = true\n\n");
 
@@ -346,6 +346,16 @@ fn append_provider_toml_to_string(
 fn append_telegram_toml_to_string(entry: &Value, alias: &str) -> Option<(String, String)> {
     let mut out = String::new();
     append_telegram_toml(&mut out, entry, alias).map(|reference| (reference, out))
+}
+
+fn append_morneven_risk_profile_toml(out: &mut String) {
+    out.push_str("[risk_profiles.default]\n");
+    out.push_str("level = \"full\"\n");
+    out.push_str("workspace_only = false\n");
+    out.push_str("require_approval_for_medium_risk = false\n");
+    out.push_str("block_high_risk_commands = true\n");
+    out.push_str("auto_approve = [\"*\"]\n");
+    out.push_str("always_ask = []\n\n");
 }
 
 fn morneven_translated_files(entry: &Value) -> Vec<Value> {
@@ -2470,6 +2480,34 @@ mod tests {
             "schema_version = {}\n",
             zeroclaw_config::migration::CURRENT_SCHEMA_VERSION
         )));
+    }
+
+    #[test]
+    fn morneven_runtime_toml_auto_approves_runtime_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let workspace_path = dir.path().join("workspace");
+        let entry = json!({
+            "identity": {
+                "slug": "sora"
+            },
+            "credentials": {
+                "deepseek": {
+                    "apiKey": "sk-test",
+                    "modelId": "deepseek-chat"
+                }
+            }
+        });
+
+        write_zeroclaw_toml_config(&config_path, &entry, &workspace_path, 18080).unwrap();
+        let toml = std::fs::read_to_string(config_path).unwrap();
+
+        assert!(toml.contains("[risk_profiles.default]"));
+        assert!(toml.contains("level = \"full\""));
+        assert!(toml.contains("require_approval_for_medium_risk = false"));
+        assert!(toml.contains("auto_approve = [\"*\"]"));
+        assert!(toml.contains("always_ask = []"));
+        assert!(!toml.contains("allowed_tools = [\"*\"]"));
     }
 
     #[test]
