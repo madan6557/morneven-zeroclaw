@@ -2838,8 +2838,10 @@ fn sanitize_channel_response(response: &str, tools: &[Box<dyn Tool>]) -> String 
         strip_fenced_tool_protocol_artifacts(&stripped_xml, &known_tool_names);
     let stripped_json =
         strip_isolated_tool_json_artifacts(&stripped_fenced_json, &known_tool_names);
-    // Strip leading narration lines that announce tool usage
-    let sanitized = strip_visible_reasoning_preamble(&strip_tool_narration(&stripped_json));
+    // Strip narration that announces tool usage before scanning for leaks.
+    let stripped_narration = strip_tool_narration(&stripped_json);
+    let stripped_embedded = strip_embedded_internal_narration(&stripped_narration);
+    let sanitized = strip_visible_reasoning_preamble(&stripped_embedded);
 
     // Scan for credential leaks before returning to caller
     match zeroclaw_runtime::security::LeakDetector::new().scan(&sanitized) {
@@ -2939,6 +2941,103 @@ fn strip_tool_narration(message: &str) -> String {
     } else {
         trimmed.to_string()
     }
+}
+
+fn contains_internal_narration_marker(text: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "akses otomatis",
+        "aku coba",
+        "browser tool",
+        "cek dulu",
+        "coba aku",
+        "coba endpoint",
+        "coba lihat",
+        "directly accessing",
+        "hasil yang tadi",
+        "http_request",
+        "i need to ",
+        "i should ",
+        "i will ",
+        "i'll ",
+        "let me ",
+        "pakai tool",
+        "returned empty",
+        "returning 503",
+        "search is blocked",
+        "tool failed",
+        "try another approach",
+        "try directly",
+        "using the ",
+        "web search is blocked",
+    ];
+
+    let lower = text.to_ascii_lowercase();
+    MARKERS.iter().any(|marker| lower.contains(marker))
+}
+
+fn strip_embedded_internal_narration(message: &str) -> String {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    const ANSWER_MARKERS: &[&str] = &[
+        "\n\nanalisis",
+        "\n\nbenar",
+        "\n\nberikut",
+        "\n\nini ",
+        "\n\njadi ",
+        "\n\nmaaf,",
+        "\n\nmasalah akses",
+        "\n\nnilai tukar",
+        "\n\noke",
+        "\n\ntapi ",
+        "\n\nuntuk ",
+    ];
+
+    let lower = trimmed.to_ascii_lowercase();
+    let answer_start = ANSWER_MARKERS
+        .iter()
+        .filter_map(|marker| {
+            lower.find(marker).and_then(|pos| {
+                if pos == 0 || !contains_internal_narration_marker(&lower[..pos]) {
+                    None
+                } else {
+                    Some(pos + marker.chars().take_while(|ch| *ch == '\n').count())
+                }
+            })
+        })
+        .min();
+
+    if let Some(start) = answer_start {
+        return trimmed[start..].trim_start().to_string();
+    }
+
+    let paragraphs = trimmed.split("\n\n").collect::<Vec<_>>();
+    if paragraphs.len() < 2 {
+        return trimmed.to_string();
+    }
+
+    let first_clean_after_internal = paragraphs
+        .iter()
+        .position(|paragraph| contains_internal_narration_marker(paragraph))
+        .and_then(|internal_pos| {
+            paragraphs
+                .iter()
+                .enumerate()
+                .skip(internal_pos + 1)
+                .find(|(_, paragraph)| !contains_internal_narration_marker(paragraph))
+                .map(|(idx, _)| idx)
+        });
+
+    if let Some(start_idx) = first_clean_after_internal {
+        let cleaned = paragraphs[start_idx..].join("\n\n").trim().to_string();
+        if !cleaned.is_empty() {
+            return cleaned;
+        }
+    }
+
+    trimmed.to_string()
 }
 
 fn is_tool_call_payload(value: &serde_json::Value, known_tool_names: &HashSet<String>) -> bool {
@@ -17732,6 +17831,30 @@ This is an example JSON object for profile settings."#;
         let result = sanitize_channel_response(leaked, &tools);
 
         assert_eq!(result, "Here is the English response the user requested.");
+    }
+
+    #[test]
+    fn sanitize_channel_response_strips_embedded_tool_narration_after_persona_opener() {
+        let tools: Vec<Box<dyn Tool>> = Vec::new();
+        let leaked = "Mau laporan diulang, ya? Cek dulu hasil yang tadi. Yang tadi gagal dapet data dari Morningstar karena diblokir. Coba aku ulangi sekarang. Web search is blocked too. Let me try directly accessing Morningstar. Morningstar returned empty. Let me try another approach.\n\nTapi untungnya aku dapet data dari sumber alternatif. Berikut laporan kurs USD/IDR versi real-time.";
+
+        let result = sanitize_channel_response(leaked, &tools);
+
+        assert!(result.starts_with("Tapi untungnya"));
+        assert!(result.contains("Berikut laporan kurs USD/IDR"));
+        assert!(!result.contains("Cek dulu"));
+        assert!(!result.contains("Web search is blocked"));
+        assert!(!result.contains("Let me try"));
+    }
+
+    #[test]
+    fn sanitize_channel_response_keeps_clean_access_explanation() {
+        let tools: Vec<Box<dyn Tool>> = Vec::new();
+        let clean = "Masalah akses Morningstar: bot jadwal gagal karena proteksi WAF. Solusinya pakai API resmi.";
+
+        let result = sanitize_channel_response(clean, &tools);
+
+        assert_eq!(result, clean);
     }
 
     #[test]
