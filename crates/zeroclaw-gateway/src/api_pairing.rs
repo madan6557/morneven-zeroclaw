@@ -4,7 +4,7 @@ use super::AppState;
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode, header},
-    response::{IntoResponse, Json},
+    response::{IntoResponse, Json, Response},
 };
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
@@ -264,11 +264,15 @@ fn extract_bearer(headers: &HeaderMap) -> Option<&str> {
         .and_then(|auth| auth.strip_prefix("Bearer "))
 }
 
-fn require_auth(state: &AppState, headers: &HeaderMap) -> Result<(), (StatusCode, &'static str)> {
+fn require_auth(state: &AppState, headers: &HeaderMap) -> Result<(), Response> {
+    if crate::morneven_auth::web_auth_enabled() {
+        return super::api::require_auth(state, headers).map_err(|error| error.into_response());
+    }
+
     if state.pairing.require_pairing() {
         let token = extract_bearer(headers).unwrap_or("");
         if !state.pairing.is_authenticated(token) {
-            return Err((StatusCode::UNAUTHORIZED, "Unauthorized"));
+            return Err((StatusCode::UNAUTHORIZED, "Unauthorized").into_response());
         }
     }
     Ok(())
@@ -303,6 +307,14 @@ pub async fn submit_pairing_enhanced(
     headers: HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    if crate::morneven_auth::web_auth_enabled() {
+        return (
+            StatusCode::NOT_FOUND,
+            "Pairing is disabled while Morneven WebUI auth is enabled",
+        )
+            .into_response();
+    }
+
     let code = body["code"].as_str().unwrap_or("");
     let device_name = body["device_name"].as_str().map(String::from);
     let device_type = body["device_type"].as_str().map(String::from);

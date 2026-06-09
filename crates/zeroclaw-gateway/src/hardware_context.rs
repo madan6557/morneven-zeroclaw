@@ -48,6 +48,10 @@ fn require_auth(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if crate::morneven_auth::web_auth_enabled() {
+        return crate::morneven_auth::require_web_session(headers).map(|_| ());
+    }
+
     if !state.pairing.require_pairing() {
         return Ok(());
     }

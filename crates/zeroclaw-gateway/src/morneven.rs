@@ -130,6 +130,12 @@ fn response(status: StatusCode, payload: Value) -> Response {
 }
 
 fn require_morneven_token(headers: &HeaderMap) -> Result<(), Response> {
+    if crate::morneven_auth::web_auth_enabled()
+        && crate::morneven_auth::require_web_session(headers).is_ok()
+    {
+        return Ok(());
+    }
+
     let expected = env::var("MORNEVEN_RELOAD_TOKEN")
         .ok()
         .filter(|value| !value.trim().is_empty())

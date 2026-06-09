@@ -182,6 +182,7 @@ export async function getAdminPairCode(): Promise<{
 export async function getPublicHealth(): Promise<{
   require_pairing: boolean;
   paired: boolean;
+  auth_mode?: "pairing" | "morneven";
 }> {
   const response = await fetch(`${basePath}/health`);
   if (!response.ok) {
@@ -190,6 +191,7 @@ export async function getPublicHealth(): Promise<{
   return response.json() as Promise<{
     require_pairing: boolean;
     paired: boolean;
+    auth_mode?: "pairing" | "morneven";
   }>;
 }
 
@@ -200,8 +202,6 @@ export async function getPublicHealth(): Promise<{
 export function getStatus(): Promise<StatusResponse> {
   return apiFetch<StatusResponse>("/api/status");
 }
-
-const MORNEVEN_TOKEN_KEY = "zeroclaw-morneven-reload-token";
 
 export type MornevenRuntimeAction = "start" | "stop" | "restart";
 
@@ -358,68 +358,66 @@ export interface MornevenProviderUsageResponse {
   events: MornevenProviderUsageEvent[];
 }
 
-export function getMornevenToken(): string {
-  try {
-    return localStorage.getItem(MORNEVEN_TOKEN_KEY) ?? "";
-  } catch {
-    return "";
-  }
+export interface MornevenAuthUser {
+  id: string;
+  username: string;
+  role: string;
+  level: number;
+  track: string;
 }
 
-export function saveMornevenToken(token: string): void {
-  try {
-    localStorage.setItem(MORNEVEN_TOKEN_KEY, token);
-  } catch {
-    // Ignore storage errors.
-  }
+export interface MornevenAuthResponse {
+  ok: boolean;
+  authMode: "morneven";
+  token: string;
+  expiresAt?: string;
+  user: MornevenAuthUser;
 }
 
-export function clearMornevenToken(): void {
-  try {
-    localStorage.removeItem(MORNEVEN_TOKEN_KEY);
-  } catch {
-    // Ignore storage errors.
-  }
+export interface MornevenSessionResponse {
+  ok: boolean;
+  authMode: "morneven";
+  user: MornevenAuthUser;
 }
 
 async function mornevenFetch<T = unknown>(
   path: string,
   options: RequestInit = {},
-  token = getMornevenToken(),
 ): Promise<T> {
-  const headers = new Headers(options.headers);
-  if (token) {
-    headers.set("x-morneven-reload-token", token);
-  }
-  if (
-    options.body &&
-    typeof options.body === "string" &&
-    !headers.has("Content-Type")
-  ) {
-    headers.set("Content-Type", "application/json");
-  }
+  return apiFetch<T>(path, options);
+}
 
-  const response = await fetch(`${apiOrigin}${basePath}${path}`, {
-    ...options,
-    headers,
+export async function loginMorneven(email: string, password: string): Promise<MornevenAuthResponse> {
+  const response = await fetch(`${apiOrigin}${basePath}/api/morneven/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
   });
   if (!response.ok) {
     const text = await response.text().catch(() => "");
-    throw new Error(`Morneven API ${response.status}: ${text || response.statusText}`);
+    if (text) {
+      try {
+        const parsed = JSON.parse(text) as { error?: string; message?: string };
+        throw new Error(parsed.error || parsed.message || `Morneven login failed (${response.status})`);
+      } catch (error) {
+        if (error instanceof Error && !error.message.startsWith("Unexpected")) throw error;
+      }
+    }
+    throw new Error(`Morneven login failed (${response.status})`);
   }
-  if (response.status === 204) {
-    return undefined as T;
-  }
-  return response.json() as Promise<T>;
+  return response.json() as Promise<MornevenAuthResponse>;
 }
 
-export function getMornevenStatus(token?: string): Promise<MornevenStatusResponse> {
-  return mornevenFetch<MornevenStatusResponse>("/api/morneven/status", {}, token);
+export function getMornevenSession(): Promise<MornevenSessionResponse> {
+  return apiFetch<MornevenSessionResponse>("/api/morneven/auth/session");
+}
+
+export function getMornevenStatus(): Promise<MornevenStatusResponse> {
+  return mornevenFetch<MornevenStatusResponse>("/api/morneven/status");
 }
 
 export function reloadMornevenBundle(
   restartGateway = false,
-  token?: string,
 ): Promise<MornevenStatusResponse> {
   return mornevenFetch<MornevenStatusResponse>(
     "/api/morneven/reload",
@@ -427,59 +425,49 @@ export function reloadMornevenBundle(
       method: "POST",
       body: JSON.stringify({ restartGateway }),
     },
-    token,
   );
 }
 
 export function runMornevenGatewayAction(
   action: MornevenRuntimeAction,
-  token?: string,
 ): Promise<MornevenStatusResponse> {
   return mornevenFetch<MornevenStatusResponse>(
     `/api/morneven/gateway/${encodeURIComponent(action)}`,
     { method: "POST" },
-    token,
   );
 }
 
 export function runMornevenRuntimeAction(
   identityId: string,
   action: MornevenRuntimeAction,
-  token?: string,
 ): Promise<MornevenStatusResponse> {
   return mornevenFetch<MornevenStatusResponse>(
     `/api/morneven/runtimes/${encodeURIComponent(identityId)}/gateway/${encodeURIComponent(action)}`,
     { method: "POST" },
-    token,
   );
 }
 
 export function getMornevenWorkspaceChanges(
   includeAll = false,
-  token?: string,
 ): Promise<MornevenWorkspaceChangesResponse> {
   const qs = includeAll ? "?include_all=true" : "";
   return mornevenFetch<MornevenWorkspaceChangesResponse>(
     `/api/morneven/workspace/changes${qs}`,
     {},
-    token,
   );
 }
 
 export function getMornevenTelegramTopics(
-  token?: string,
 ): Promise<MornevenTelegramTopicsResponse> {
   return mornevenFetch<MornevenTelegramTopicsResponse>(
     "/api/morneven/telegram/topics",
     {},
-    token,
   );
 }
 
 export function getMornevenProviderUsage(
   from?: Date,
   to?: Date,
-  token?: string,
 ): Promise<MornevenProviderUsageResponse> {
   const params = new URLSearchParams();
   if (from) params.set("from", from.toISOString());
@@ -488,7 +476,6 @@ export function getMornevenProviderUsage(
   return mornevenFetch<MornevenProviderUsageResponse>(
     `/api/morneven/provider-usage${qs ? `?${qs}` : ""}`,
     {},
-    token,
   );
 }
 

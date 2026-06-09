@@ -262,8 +262,115 @@ function PairingDialog({
   );
 }
 
+function MornevenLoginDialog({
+  onLogin,
+}: {
+  onLogin: (email: string, password: string) => Promise<void>;
+}) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setLoading(true);
+    setError("");
+    try {
+      await onLogin(email, password);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Morneven login failed");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div
+      className="min-h-screen flex items-center justify-center px-4"
+      style={{ background: "var(--pc-bg-base)" }}
+    >
+      <div className="surface-panel w-full max-w-md p-8 animate-fade-in-scale">
+        <div className="mb-8 text-center">
+          <img
+            src={`${basePath}/_app/zeroclaw-trans.png`}
+            alt="ZeroClaw"
+            className="h-16 w-16 rounded-2xl object-cover mx-auto mb-4"
+            onError={(e) => {
+              e.currentTarget.style.display = "none";
+            }}
+          />
+          <h1 className="text-2xl font-bold mb-2 text-gradient-blue">
+            ZeroClaw
+          </h1>
+          <p className="text-sm" style={{ color: "var(--pc-text-muted)" }}>
+            Sign in with a Morneven account that can access Bot Manager.
+          </p>
+        </div>
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <label className="block">
+            <span className="mb-2 block text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--pc-text-muted)" }}>
+              Email
+            </span>
+            <input
+              type="email"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              className="input-electric w-full px-4 py-3 text-sm"
+              autoComplete="email"
+              required
+              autoFocus
+            />
+          </label>
+          <label className="block">
+            <span className="mb-2 block text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--pc-text-muted)" }}>
+              Password
+            </span>
+            <input
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              className="input-electric w-full px-4 py-3 text-sm"
+              autoComplete="current-password"
+              required
+            />
+          </label>
+          {error && (
+            <p
+              aria-live="polite"
+              className="rounded-xl border p-3 text-sm"
+              style={{
+                color: "var(--color-status-error)",
+                borderColor: "var(--color-status-error-alpha-20)",
+                background: "var(--color-status-error-alpha-08)",
+              }}
+            >
+              {error}
+            </p>
+          )}
+          <button
+            type="submit"
+            disabled={loading || !email.trim() || !password}
+            className="btn-electric w-full py-3.5 text-sm font-semibold tracking-wide"
+          >
+            {loading ? (
+              <span className="flex items-center justify-center gap-2">
+                <span className="h-4 w-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                Signing in...
+              </span>
+            ) : (
+              "Sign in"
+            )}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 function AppContent() {
-  const { isAuthenticated, requiresPairing, loading, pair, logout } = useAuth();
+  const { isAuthenticated, authMode, requiresPairing, loading, login, pair, logout } = useAuth();
   const [locale, setLocaleState] = useState(loadLocale());
   const draftStore = useDraftStore();
   setLocale(locale as Locale);
@@ -300,6 +407,10 @@ function AppContent() {
         </div>
       </div>
     );
+  }
+
+  if (!isAuthenticated && authMode === "morneven") {
+    return <MornevenLoginDialog onLogin={login} />;
   }
 
   if (!isAuthenticated && requiresPairing) {

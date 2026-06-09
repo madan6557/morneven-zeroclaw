@@ -8,25 +8,20 @@ import {
   Database,
   FileText,
   FolderTree,
-  KeyRound,
   Loader2,
   Play,
   RefreshCw,
   RotateCw,
-  ShieldCheck,
   Square,
 } from "lucide-react";
 import {
-  clearMornevenToken,
   getMornevenProviderUsage,
   getMornevenStatus,
   getMornevenTelegramTopics,
-  getMornevenToken,
   getMornevenWorkspaceChanges,
   reloadMornevenBundle,
   runMornevenGatewayAction,
   runMornevenRuntimeAction,
-  saveMornevenToken,
   type MornevenMaterializedRuntime,
   type MornevenProviderUsageEvent,
   type MornevenRuntimeAction,
@@ -36,6 +31,7 @@ import {
   type MornevenWorkspaceChangesResponse,
   type MornevenWorkspaceRuntime,
 } from "@/lib/api";
+import { useAuth } from "@/hooks/useAuth";
 
 const USAGE_WINDOW_DAYS = 7;
 
@@ -206,8 +202,7 @@ function MetricCard({
 }
 
 export default function MornevenBotManager() {
-  const [token, setToken] = useState(() => getMornevenToken());
-  const [tokenDraft, setTokenDraft] = useState(() => getMornevenToken());
+  const { user } = useAuth();
   const [status, setStatus] = useState<MornevenStatusResponse | null>(null);
   const [workspaceAudit, setWorkspaceAudit] = useState<MornevenWorkspaceChangesResponse | null>(null);
   const [telegramTopics, setTelegramTopics] = useState<MornevenTelegramTopicsResponse | null>(null);
@@ -218,16 +213,11 @@ export default function MornevenBotManager() {
   const [lastLoadedAt, setLastLoadedAt] = useState<string | null>(null);
 
   const load = useCallback(
-    async (options: { quiet?: boolean; tokenOverride?: string } = {}) => {
-      const activeToken = options.tokenOverride ?? token;
-      if (!activeToken) {
-        setStatus(null);
-        return;
-      }
+    async (options: { quiet?: boolean } = {}) => {
       if (!options.quiet) setLoading(true);
       setError(null);
       try {
-        const nextStatus = await getMornevenStatus(activeToken);
+        const nextStatus = await getMornevenStatus();
         setStatus(nextStatus);
         setLastLoadedAt(new Date().toISOString());
 
@@ -235,9 +225,9 @@ export default function MornevenBotManager() {
         const from = new Date(now);
         from.setDate(from.getDate() - USAGE_WINDOW_DAYS);
         const [workspaceResult, topicsResult, usageResult] = await Promise.allSettled([
-          getMornevenWorkspaceChanges(false, activeToken),
-          getMornevenTelegramTopics(activeToken),
-          getMornevenProviderUsage(from, now, activeToken),
+          getMornevenWorkspaceChanges(false),
+          getMornevenTelegramTopics(),
+          getMornevenProviderUsage(from, now),
         ]);
         if (workspaceResult.status === "fulfilled") setWorkspaceAudit(workspaceResult.value);
         if (topicsResult.status === "fulfilled") setTelegramTopics(topicsResult.value);
@@ -248,7 +238,7 @@ export default function MornevenBotManager() {
         if (!options.quiet) setLoading(false);
       }
     },
-    [token],
+    [],
   );
 
   useEffect(() => {
@@ -256,12 +246,11 @@ export default function MornevenBotManager() {
   }, [load]);
 
   useEffect(() => {
-    if (!token) return undefined;
     const timer = window.setInterval(() => {
       void load({ quiet: true });
     }, 10000);
     return () => window.clearInterval(timer);
-  }, [load, token]);
+  }, [load]);
 
   const materializedById = useMemo(() => {
     const map = new Map<string, MornevenMaterializedRuntime>();
@@ -319,32 +308,15 @@ export default function MornevenBotManager() {
   const groupCount = runtimes.reduce((total, runtime) => total + (runtime.topicGroups?.length ?? 0), 0);
   const topicCount = runtimes.reduce((total, runtime) => total + countTopics(runtime.topicGroups), 0);
 
-  const handleSaveToken = () => {
-    const nextToken = tokenDraft.trim();
-    saveMornevenToken(nextToken);
-    setToken(nextToken);
-    void load({ tokenOverride: nextToken });
-  };
-
-  const handleClearToken = () => {
-    clearMornevenToken();
-    setToken("");
-    setTokenDraft("");
-    setStatus(null);
-    setWorkspaceAudit(null);
-    setTelegramTopics(null);
-    setUsageEvents([]);
-  };
-
   const runAction = async (action: MornevenRuntimeAction, identityId?: string) => {
     const key = identityId ? `${identityId}:${action}` : `all:${action}`;
     setActionKey(key);
     setError(null);
     try {
       if (identityId) {
-        await runMornevenRuntimeAction(identityId, action, token);
+        await runMornevenRuntimeAction(identityId, action);
       } else {
-        await runMornevenGatewayAction(action, token);
+        await runMornevenGatewayAction(action);
       }
       await load({ quiet: true });
     } catch (err) {
@@ -358,7 +330,7 @@ export default function MornevenBotManager() {
     setActionKey(restartGateway ? "sync-restart" : "sync");
     setError(null);
     try {
-      await reloadMornevenBundle(restartGateway, token);
+      await reloadMornevenBundle(restartGateway);
       await load({ quiet: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -366,8 +338,6 @@ export default function MornevenBotManager() {
       setActionKey(null);
     }
   };
-
-  const tokenSaved = token.length > 0;
 
   return (
     <div className="p-6 space-y-6 animate-fade-in">
@@ -378,8 +348,8 @@ export default function MornevenBotManager() {
             <h2 className="text-sm font-semibold uppercase tracking-wider" style={{ color: "var(--pc-text-primary)" }}>
               Morneven Bot Manager
             </h2>
-            <Badge tone={tokenSaved ? "success" : "warning"}>
-              {tokenSaved ? "Token saved" : "Token required"}
+            <Badge tone="success">
+              {user ? `${user.username} - PL${user.level}` : "Morneven auth"}
             </Badge>
           </div>
           <p className="mt-2 text-sm" style={{ color: "var(--pc-text-muted)" }}>
@@ -387,25 +357,8 @@ export default function MornevenBotManager() {
           </p>
         </div>
 
-        <div className="flex w-full flex-col gap-2 sm:flex-row xl:w-auto">
-          <div className="relative flex-1 xl:w-96">
-            <KeyRound className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2" style={{ color: "var(--pc-text-muted)" }} />
-            <input
-              type="password"
-              value={tokenDraft}
-              onChange={(event) => setTokenDraft(event.target.value)}
-              placeholder="Morneven reload token"
-              className="input-electric h-11 w-full pl-10 pr-3 text-sm"
-              autoComplete="off"
-            />
-          </div>
-          <button type="button" className="btn-secondary flex h-11 items-center justify-center gap-2" onClick={handleSaveToken}>
-            <ShieldCheck className="h-4 w-4" />
-            Save
-          </button>
-          <button type="button" className="btn-secondary flex h-11 items-center justify-center gap-2" onClick={handleClearToken}>
-            Clear
-          </button>
+        <div className="flex w-full justify-end text-sm xl:w-auto" style={{ color: "var(--pc-text-muted)" }}>
+          {lastLoadedAt ? `Last refresh ${formatDate(lastLoadedAt)}` : "Waiting for first refresh"}
         </div>
       </div>
 
@@ -427,7 +380,7 @@ export default function MornevenBotManager() {
         <button
           type="button"
           className="btn-electric flex items-center gap-2 px-4 py-2 text-sm"
-          disabled={!tokenSaved || loading || actionKey === "sync"}
+          disabled={loading || actionKey === "sync"}
           onClick={() => syncBundle(false)}
         >
           {actionKey === "sync" ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
@@ -436,7 +389,7 @@ export default function MornevenBotManager() {
         <button
           type="button"
           className="btn-secondary flex items-center gap-2"
-          disabled={!tokenSaved || loading || actionKey === "sync-restart"}
+          disabled={loading || actionKey === "sync-restart"}
           onClick={() => syncBundle(true)}
         >
           {actionKey === "sync-restart" ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCw className="h-4 w-4" />}
@@ -445,7 +398,7 @@ export default function MornevenBotManager() {
         <button
           type="button"
           className="btn-secondary flex items-center gap-2"
-          disabled={!tokenSaved || loading}
+          disabled={loading}
           onClick={() => load()}
         >
           {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
@@ -489,7 +442,7 @@ export default function MornevenBotManager() {
             key={action}
             type="button"
             className={action === "stop" ? "btn-danger flex items-center gap-2" : "btn-secondary flex items-center gap-2"}
-            disabled={!tokenSaved || loading || actionKey === `all:${action}`}
+            disabled={loading || actionKey === `all:${action}`}
             onClick={() => runAction(action)}
           >
             {actionIcon(action, actionKey === `all:${action}`)}
@@ -536,7 +489,7 @@ export default function MornevenBotManager() {
                           key={action}
                           type="button"
                           className={action === "stop" ? "btn-danger flex items-center gap-2 px-3 py-2" : "btn-secondary flex items-center gap-2 px-3 py-2"}
-                          disabled={!tokenSaved || !identityId || actionKey === `${identityId}:${action}` || (action === "start" && isRunning) || (action === "stop" && !isRunning)}
+                          disabled={!identityId || actionKey === `${identityId}:${action}` || (action === "start" && isRunning) || (action === "stop" && !isRunning)}
                           onClick={() => runAction(action, identityId)}
                         >
                           {actionIcon(action, actionKey === `${identityId}:${action}`)}

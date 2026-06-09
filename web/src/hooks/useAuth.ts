@@ -13,32 +13,27 @@ import {
   clearToken as removeToken,
   isAuthenticated as checkAuth,
 } from '../lib/auth';
-import { pair as apiPair, getPublicHealth } from '../lib/api';
-
-// ---------------------------------------------------------------------------
-// Context shape
-// ---------------------------------------------------------------------------
+import {
+  pair as apiPair,
+  getPublicHealth,
+  getMornevenSession,
+  loginMorneven,
+  type MornevenAuthUser,
+} from '../lib/api';
 
 export interface AuthState {
-  /** The current bearer token, or null if not authenticated. */
   token: string | null;
-  /** Whether the user is currently authenticated. */
   isAuthenticated: boolean;
-  /** Whether the server requires pairing. Defaults to true (safe fallback). */
+  authMode: 'pairing' | 'morneven';
+  user: MornevenAuthUser | null;
   requiresPairing: boolean;
-  /** True while the initial auth check is in progress. */
   loading: boolean;
-  /** Pair with the agent using a pairing code. Stores the token on success. */
+  login: (email: string, password: string) => Promise<void>;
   pair: (code: string) => Promise<void>;
-  /** Clear the stored token and sign out. */
   logout: () => void;
 }
 
 const AuthContext = createContext<AuthState | null>(null);
-
-// ---------------------------------------------------------------------------
-// Provider
-// ---------------------------------------------------------------------------
 
 export interface AuthProviderProps {
   children: ReactNode;
@@ -46,64 +41,126 @@ export interface AuthProviderProps {
 
 export function AuthProvider({ children }: AuthProviderProps) {
   const [token, setTokenState] = useState<string | null>(readToken);
-  const [authenticated, setAuthenticated] = useState<boolean>(checkAuth);
+  const [authenticated, setAuthenticated] = useState<boolean>(false);
+  const [authMode, setAuthMode] = useState<'pairing' | 'morneven'>('pairing');
+  const [user, setUser] = useState<MornevenAuthUser | null>(null);
   const [requiresPairing, setRequiresPairing] = useState<boolean>(true);
-  const [loading, setLoading] = useState<boolean>(!checkAuth());
+  const [loading, setLoading] = useState<boolean>(true);
 
-  // On mount: check if server requires pairing at all
   useEffect(() => {
-    if (checkAuth()) return; // already have a token, no need to check
     let cancelled = false;
-    getPublicHealth()
-      .then((health) => {
+
+    const bootstrap = async () => {
+      try {
+        const health = await getPublicHealth();
         if (cancelled) return;
-        if (!health.require_pairing) {
-          setRequiresPairing(false);
-          setAuthenticated(true);
+        const mode = health.auth_mode === 'morneven' ? 'morneven' : 'pairing';
+        setAuthMode(mode);
+
+        if (mode === 'morneven') {
+          setRequiresPairing(true);
+          if (!checkAuth()) {
+            setAuthenticated(false);
+            setUser(null);
+            return;
+          }
+          try {
+            const session = await getMornevenSession();
+            if (cancelled) return;
+            setAuthenticated(true);
+            setUser(session.user);
+          } catch {
+            if (cancelled) return;
+            removeToken();
+            setTokenState(null);
+            setAuthenticated(false);
+            setUser(null);
+          }
+          return;
         }
-      })
-      .catch(() => {
-        // health endpoint unreachable — fall back to showing pairing dialog
-      })
-      .finally(() => {
+
+        setRequiresPairing(health.require_pairing);
+        setAuthenticated(!health.require_pairing || checkAuth());
+        setUser(null);
+      } catch {
+        if (!cancelled) {
+          setAuthenticated(false);
+          setUser(null);
+        }
+      } finally {
         if (!cancelled) setLoading(false);
-      });
+      }
+    };
+
+    void bootstrap();
     return () => {
       cancelled = true;
     };
   }, []);
 
-  // Keep state in sync if localStorage is changed in another tab
   useEffect(() => {
     const handler = (e: StorageEvent) => {
-      if (e.key === 'zeroclaw_token') {
-        const t = readToken();
-        setTokenState(t);
-        setAuthenticated(t !== null && t.length > 0);
+      if (e.key !== 'zeroclaw_token') return;
+      const nextToken = readToken();
+      setTokenState(nextToken);
+      if (!nextToken) {
+        setAuthenticated(false);
+        setUser(null);
+        return;
       }
+      if (authMode === 'pairing') {
+        setAuthenticated(true);
+        return;
+      }
+      void getMornevenSession()
+        .then((session) => {
+          setAuthenticated(true);
+          setUser(session.user);
+        })
+        .catch(() => {
+          removeToken();
+          setTokenState(null);
+          setAuthenticated(false);
+          setUser(null);
+        });
     };
     window.addEventListener('storage', handler);
     return () => window.removeEventListener('storage', handler);
+  }, [authMode]);
+
+  const login = useCallback(async (email: string, password: string): Promise<void> => {
+    const next = await loginMorneven(email, password);
+    writeToken(next.token);
+    setTokenState(next.token);
+    setAuthMode('morneven');
+    setUser(next.user);
+    setAuthenticated(true);
   }, []);
 
   const pair = useCallback(async (code: string): Promise<void> => {
     const { token: newToken } = await apiPair(code);
     writeToken(newToken);
     setTokenState(newToken);
+    setAuthMode('pairing');
+    setUser(null);
     setAuthenticated(true);
   }, []);
 
   const logout = useCallback((): void => {
     removeToken();
     setTokenState(null);
+    setUser(null);
     setAuthenticated(false);
   }, []);
 
   const value: AuthState = {
     token,
     isAuthenticated: authenticated,
+    authMode,
+    user,
     requiresPairing,
     loading,
+    login,
     pair,
     logout,
   };
@@ -111,14 +168,6 @@ export function AuthProvider({ children }: AuthProviderProps) {
   return React.createElement(AuthContext.Provider, { value }, children);
 }
 
-// ---------------------------------------------------------------------------
-// Hook
-// ---------------------------------------------------------------------------
-
-/**
- * Access the authentication state from any component inside `<AuthProvider>`.
- * Throws if used outside the provider.
- */
 export function useAuth(): AuthState {
   const ctx = useContext(AuthContext);
   if (!ctx) {

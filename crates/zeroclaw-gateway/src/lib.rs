@@ -30,6 +30,7 @@ pub mod auth_rate_limit;
 pub mod canvas;
 pub mod hardware_context;
 pub mod morneven;
+pub mod morneven_auth;
 pub mod node_tool;
 pub mod nodes;
 pub mod openapi;
@@ -1460,6 +1461,14 @@ pub async fn run_gateway(
         .route("/hooks/claude-code", post(api::handle_claude_code_hook))
         // ── Web Dashboard API routes ──
         .route("/api/status", get(api::handle_api_status))
+        .route(
+            "/api/morneven/auth/login",
+            post(morneven_auth::handle_login),
+        )
+        .route(
+            "/api/morneven/auth/session",
+            get(morneven_auth::handle_session),
+        )
         .route("/api/morneven/status", get(morneven::handle_status))
         .route("/api/morneven/reload", post(morneven::handle_reload))
         .route(
@@ -1871,10 +1880,12 @@ fn format_paircode_recovery_curl(host: &str, port: u16, path_prefix: &str) -> St
 
 /// GET /health — always public (no secrets leaked)
 async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
+    let morneven_auth_enabled = morneven_auth::web_auth_enabled();
     let body = serde_json::json!({
         "status": "ok",
         "paired": state.pairing.is_paired(),
-        "require_pairing": state.pairing.require_pairing(),
+        "require_pairing": if morneven_auth_enabled { true } else { state.pairing.require_pairing() },
+        "auth_mode": if morneven_auth_enabled { "morneven" } else { "pairing" },
         "runtime": zeroclaw_runtime::health::snapshot_json(),
     });
     Json(body)
@@ -1933,6 +1944,13 @@ async fn handle_pair(
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
+    if morneven_auth::web_auth_enabled() {
+        let err = serde_json::json!({
+            "error": "Pairing is disabled while Morneven WebUI auth is enabled"
+        });
+        return (StatusCode::NOT_FOUND, Json(err));
+    }
+
     let rate_key =
         client_key_from_request(Some(peer_addr), &headers, state.trust_forwarded_headers);
     if !state.rate_limiter.allow_pair(&rate_key) {
@@ -3475,6 +3493,15 @@ async fn handle_admin_paircode_new(
 /// paired yet and a pairing code exists). Once the first device pairs, this
 /// endpoint stops returning a code.
 async fn handle_pair_code(State(state): State<AppState>) -> impl IntoResponse {
+    if morneven_auth::web_auth_enabled() {
+        let body = serde_json::json!({
+            "success": true,
+            "pairing_required": false,
+            "pairing_code": null,
+        });
+        return (StatusCode::OK, Json(body));
+    }
+
     let require = state.pairing.require_pairing();
     let is_paired = state.pairing.is_paired();
 

@@ -177,7 +177,12 @@ pub async fn handle_ws_chat(
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     // Auth: check header, subprotocol, then query param (precedence order)
-    if state.pairing.require_pairing() {
+    if crate::morneven_auth::web_auth_enabled() {
+        let token = extract_ws_token(&headers, params.token.as_deref()).unwrap_or("");
+        if let Err(error) = crate::morneven_auth::validate_session_token(token) {
+            return (axum::http::StatusCode::UNAUTHORIZED, error).into_response();
+        }
+    } else if state.pairing.require_pairing() {
         let token = extract_ws_token(&headers, params.token.as_deref()).unwrap_or("");
         if !state.pairing.is_authenticated(token) {
             return (

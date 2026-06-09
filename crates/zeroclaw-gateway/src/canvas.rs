@@ -167,7 +167,27 @@ pub async fn handle_ws_canvas(
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     // Auth check (same pattern as ws::handle_ws_chat)
-    if state.pairing.require_pairing() {
+    if crate::morneven_auth::web_auth_enabled() {
+        let token = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|auth| auth.strip_prefix("Bearer "))
+            .or_else(|| {
+                headers
+                    .get("sec-websocket-protocol")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|protos| {
+                        protos
+                            .split(',')
+                            .map(|p| p.trim())
+                            .find_map(|p| p.strip_prefix("bearer."))
+                    })
+            })
+            .unwrap_or("");
+        if let Err(error) = crate::morneven_auth::validate_session_token(token) {
+            return (StatusCode::UNAUTHORIZED, error).into_response();
+        }
+    } else if state.pairing.require_pairing() {
         let token = headers
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())

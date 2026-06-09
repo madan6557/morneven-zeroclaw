@@ -52,8 +52,14 @@ pub async fn handle_sse_events(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
+    if crate::morneven_auth::web_auth_enabled() {
+        if let Err(e) = super::api::require_auth(&state, &headers) {
+            return e.into_response();
+        }
+    }
+
     // Auth check
-    if state.pairing.require_pairing() {
+    if !crate::morneven_auth::web_auth_enabled() && state.pairing.require_pairing() {
         let token = headers
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
