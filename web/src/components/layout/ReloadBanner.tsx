@@ -1,10 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import { AlertTriangle } from 'lucide-react';
 import { getDrift, getReloadStatus, type DriftEntry } from '@/lib/api';
 import ReloadDaemonButton from '@/components/sections/ReloadDaemonButton';
-
-const POLL_INTERVAL_MS = 5_000;
 
 interface BannerState {
   pendingReload: boolean;
@@ -12,7 +10,7 @@ interface BannerState {
 }
 
 /**
- * Layout-level banner. Polls the gateway for two distinct reload triggers:
+ * Layout-level banner. Checks the gateway for two distinct reload triggers:
  *
  * - `pending_reload`: config writes have landed in this session, subsystems
  *   may need a reload to apply (channels rebind, providers swap keys, etc.).
@@ -20,7 +18,7 @@ interface BannerState {
  *   state, typically because an external editor touched the file.
  *
  * Hidden when both signals are clear. Shows the same `ReloadDaemonButton`
- * the Config page already uses — when reload completes, both signals clear
+ * the Config page already uses. When reload completes, both signals clear
  * (the server-side flag resets and the daemon re-reads disk).
  */
 export default function ReloadBanner() {
@@ -28,30 +26,27 @@ export default function ReloadBanner() {
   const [pollKey, setPollKey] = useState(0);
   const location = useLocation();
 
+  const checkReloadState = useCallback(async (): Promise<BannerState> => {
+    const [{ pending_reload }, { drifted }] = await Promise.all([
+      getReloadStatus(),
+      getDrift(),
+    ]);
+    return { pendingReload: pending_reload, drifted };
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
-
-    async function pollOnce() {
-      try {
-        const [{ pending_reload }, { drifted }] = await Promise.all([
-          getReloadStatus(),
-          getDrift(),
-        ]);
-        if (!cancelled) {
-          setState({ pendingReload: pending_reload, drifted });
-        }
-      } catch {
-        // Network blip or auth lapse: keep the prior state.
-      }
-    }
-
-    pollOnce();
-    const interval = setInterval(pollOnce, POLL_INTERVAL_MS);
+    checkReloadState()
+      .then((nextState) => {
+        if (!cancelled) setState(nextState);
+      })
+      .catch(() => {
+        if (!cancelled) setState(null);
+      });
     return () => {
       cancelled = true;
-      clearInterval(interval);
     };
-  }, [pollKey]);
+  }, [checkReloadState, pollKey]);
 
   if (!state || (!state.pendingReload && state.drifted.length === 0)) {
     return null;
@@ -103,7 +98,7 @@ export default function ReloadBanner() {
           {pendingReload && driftedCount > 0
             ? 'Config changed this session and on-disk drift detected'
             : pendingReload
-              ? 'Config changed — reload daemon to apply'
+              ? 'Config changed. Reload daemon to apply'
               : `${driftedCount} path${driftedCount === 1 ? '' : 's'} differ from on-disk`}
         </p>
         {driftedCount > 0 && (

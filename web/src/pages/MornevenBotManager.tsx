@@ -101,6 +101,14 @@ function formatDuration(seconds?: number | null): string {
   return `${Math.floor(seconds)}s`;
 }
 
+function runtimeUptimeSeconds(runtime: MornevenRuntimeStatus, nowMs: number): number | null | undefined {
+  if (runtime.state !== "running" || !runtime.startedAt) return runtime.uptime;
+  const startedAtMs = new Date(runtime.startedAt).getTime();
+  if (Number.isNaN(startedAtMs)) return runtime.uptime;
+  const liveUptime = Math.floor((nowMs - startedAtMs) / 1000);
+  return Math.max(runtime.uptime ?? 0, liveUptime);
+}
+
 function formatNumber(value: number): string {
   return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value);
 }
@@ -211,6 +219,7 @@ export default function MornevenBotManager() {
   const [actionKey, setActionKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastLoadedAt, setLastLoadedAt] = useState<string | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   const load = useCallback(
     async (options: { quiet?: boolean } = {}) => {
@@ -247,10 +256,10 @@ export default function MornevenBotManager() {
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      void load({ quiet: true });
-    }, 10000);
+      setNowMs(Date.now());
+    }, 1000);
     return () => window.clearInterval(timer);
-  }, [load]);
+  }, []);
 
   const materializedById = useMemo(() => {
     const map = new Map<string, MornevenMaterializedRuntime>();
@@ -500,7 +509,7 @@ export default function MornevenBotManager() {
                   </div>
 
                   <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-                    <RuntimeFact label="Uptime" value={formatDuration(runtime.uptime)} icon={<Clock className="h-3.5 w-3.5" />} />
+                    <RuntimeFact label="Uptime" value={formatDuration(runtimeUptimeSeconds(runtime, nowMs))} icon={<Clock className="h-3.5 w-3.5" />} />
                     <RuntimeFact label="PID" value={runtime.pid ? String(runtime.pid) : "-"} />
                     <RuntimeFact label="Port" value={runtime.gatewayPort ? String(runtime.gatewayPort) : "-"} />
                     <RuntimeFact label="Files" value={formatNumber(runtime.materialized?.fileCount ?? 0)} />
