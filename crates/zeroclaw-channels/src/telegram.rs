@@ -1149,6 +1149,7 @@ impl TelegramChannel {
             serde_json::json!({ "command": "model",  "description": "Show or switch the current model" }),
             serde_json::json!({ "command": "models", "description": "List available model_providers or switch model_provider" }),
             serde_json::json!({ "command": "config", "description": "Show current configuration" }),
+            serde_json::json!({ "command": "dream",  "description": "Run a Morneven dream cycle" }),
         ];
 
         // Track registered names to deduplicate across skills and tools.
@@ -7522,6 +7523,7 @@ mod tests {
                 { "command": "model",  "description": "Show or switch the current model" },
                 { "command": "models", "description": "List available model_providers or switch model_provider" },
                 { "command": "config", "description": "Show current configuration" },
+                { "command": "dream",  "description": "Run a Morneven dream cycle" },
             ]
         });
 
@@ -7683,6 +7685,7 @@ mod tests {
                 { "command": "model",   "description": "Show or switch the current model" },
                 { "command": "models",  "description": "List available model_providers or switch model_provider" },
                 { "command": "config",  "description": "Show current configuration" },
+                { "command": "dream",   "description": "Run a Morneven dream cycle" },
                 { "command": "weather", "description": "Check the weather forecast" },
             ]
         });
@@ -7725,6 +7728,7 @@ mod tests {
                 { "command": "model",     "description": "Show or switch the current model" },
                 { "command": "models",    "description": "List available model_providers or switch model_provider" },
                 { "command": "config",    "description": "Show current configuration" },
+                { "command": "dream",     "description": "Run a Morneven dream cycle" },
                 { "command": "test_tool", "description": "A test tool" },
             ]
         });
