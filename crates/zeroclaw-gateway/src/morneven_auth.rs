@@ -147,8 +147,8 @@ fn now_unix_seconds() -> i64 {
 
 fn sign_payload(payload: &str) -> Result<String, String> {
     let secret = session_secret()?;
-    let mut mac =
-        HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_| "Invalid session secret".to_string())?;
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+        .map_err(|_| "Invalid session secret".to_string())?;
     mac.update(payload.as_bytes());
     Ok(hex::encode(mac.finalize().into_bytes()))
 }
@@ -171,7 +171,10 @@ fn issue_session_token(user: &MornevenWebUser) -> Result<(String, String), Strin
     let expires_at_iso = chrono::DateTime::<chrono::Utc>::from_timestamp(expires_at, 0)
         .map(|value| value.to_rfc3339())
         .unwrap_or_default();
-    Ok((format!("{SESSION_PREFIX}.{payload}.{signature}"), expires_at_iso))
+    Ok((
+        format!("{SESSION_PREFIX}.{payload}.{signature}"),
+        expires_at_iso,
+    ))
 }
 
 pub fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
@@ -187,20 +190,26 @@ pub fn validate_session_token(token: &str) -> Result<MornevenWebUser, String> {
     let prefix = parts.next().unwrap_or_default();
     let payload = parts.next().unwrap_or_default();
     let signature = parts.next().unwrap_or_default();
-    if prefix != SESSION_PREFIX || payload.is_empty() || signature.is_empty() || parts.next().is_some() {
+    if prefix != SESSION_PREFIX
+        || payload.is_empty()
+        || signature.is_empty()
+        || parts.next().is_some()
+    {
         return Err("Invalid Morneven session token".to_string());
     }
 
-    let provided = hex::decode(signature).map_err(|_| "Invalid Morneven session signature".to_string())?;
+    let provided =
+        hex::decode(signature).map_err(|_| "Invalid Morneven session signature".to_string())?;
     let mut mac = HmacSha256::new_from_slice(session_secret()?.as_bytes())
         .map_err(|_| "Invalid session secret".to_string())?;
     mac.update(payload.as_bytes());
     mac.verify_slice(&provided)
         .map_err(|_| "Invalid Morneven session signature".to_string())?;
 
-    let payload_bytes = hex::decode(payload).map_err(|_| "Invalid Morneven session payload".to_string())?;
-    let claims: MornevenSessionClaims =
-        serde_json::from_slice(&payload_bytes).map_err(|_| "Invalid Morneven session payload".to_string())?;
+    let payload_bytes =
+        hex::decode(payload).map_err(|_| "Invalid Morneven session payload".to_string())?;
+    let claims: MornevenSessionClaims = serde_json::from_slice(&payload_bytes)
+        .map_err(|_| "Invalid Morneven session payload".to_string())?;
     if claims.exp <= now_unix_seconds() {
         return Err("Morneven session expired".to_string());
     }
@@ -213,7 +222,9 @@ pub fn validate_session_token(token: &str) -> Result<MornevenWebUser, String> {
     })
 }
 
-pub fn require_web_session(headers: &HeaderMap) -> Result<MornevenWebUser, (StatusCode, Json<Value>)> {
+pub fn require_web_session(
+    headers: &HeaderMap,
+) -> Result<MornevenWebUser, (StatusCode, Json<Value>)> {
     let token = extract_bearer_token(headers)
         .ok_or_else(|| auth_error(StatusCode::UNAUTHORIZED, "Missing Morneven session"))?;
     validate_session_token(token).map_err(|error| auth_error(StatusCode::UNAUTHORIZED, error))
@@ -251,12 +262,25 @@ pub async fn handle_login(Json(body): Json<MornevenLoginRequest>) -> Response {
         .await
     {
         Ok(value) => value,
-        Err(error) => return error_response(StatusCode::BAD_GATEWAY, format!("Morneven login request failed: {error}")),
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                format!("Morneven login request failed: {error}"),
+            );
+        }
     };
     let login_status = login_response.status();
-    let login_payload = match login_response.json::<BackendEnvelope<BackendLoginData>>().await {
+    let login_payload = match login_response
+        .json::<BackendEnvelope<BackendLoginData>>()
+        .await
+    {
         Ok(value) => value,
-        Err(error) => return error_response(StatusCode::BAD_GATEWAY, format!("Invalid Morneven login response: {error}")),
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                format!("Invalid Morneven login response: {error}"),
+            );
+        }
     };
     if !login_status.is_success() || !login_payload.success {
         return error_response(
@@ -268,7 +292,10 @@ pub async fn handle_login(Json(body): Json<MornevenLoginRequest>) -> Response {
         );
     }
     let Some(login_data) = login_payload.data else {
-        return error_response(StatusCode::BAD_GATEWAY, "Morneven login response did not include a token");
+        return error_response(
+            StatusCode::BAD_GATEWAY,
+            "Morneven login response did not include a token",
+        );
     };
 
     let access_response = match client
@@ -278,12 +305,25 @@ pub async fn handle_login(Json(body): Json<MornevenLoginRequest>) -> Response {
         .await
     {
         Ok(value) => value,
-        Err(error) => return error_response(StatusCode::BAD_GATEWAY, format!("Morneven access check failed: {error}")),
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                format!("Morneven access check failed: {error}"),
+            );
+        }
     };
     let access_status = access_response.status();
-    let access_payload = match access_response.json::<BackendEnvelope<BackendAccessData>>().await {
+    let access_payload = match access_response
+        .json::<BackendEnvelope<BackendAccessData>>()
+        .await
+    {
         Ok(value) => value,
-        Err(error) => return error_response(StatusCode::BAD_GATEWAY, format!("Invalid Morneven access response: {error}")),
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                format!("Invalid Morneven access response: {error}"),
+            );
+        }
     };
     if !access_status.is_success() || !access_payload.success {
         return error_response(
@@ -295,7 +335,10 @@ pub async fn handle_login(Json(body): Json<MornevenLoginRequest>) -> Response {
         );
     }
     let Some(access_data) = access_payload.data else {
-        return error_response(StatusCode::BAD_GATEWAY, "Morneven access response was empty");
+        return error_response(
+            StatusCode::BAD_GATEWAY,
+            "Morneven access response was empty",
+        );
     };
     if !access_data.can_access_bot_manager {
         return error_response(StatusCode::FORBIDDEN, "Bot Manager access denied");

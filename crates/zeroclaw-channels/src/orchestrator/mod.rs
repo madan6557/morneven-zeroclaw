@@ -540,6 +540,8 @@ fn command_view_content(content: &str) -> &str {
 
     trimmed
         .split("\n\n")
+        .collect::<Vec<_>>()
+        .into_iter()
         .rev()
         .map(str::trim)
         .find(|part| part.starts_with('/'))
@@ -2141,7 +2143,10 @@ async fn send_channel_command_feedback(
             WARN,
             ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
                 .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-            &format!("Failed to send channel command feedback on {}: {err}", channel.name())
+            &format!(
+                "Failed to send channel command feedback on {}: {err}",
+                channel.name()
+            )
         );
     }
 }

@@ -733,7 +733,9 @@ impl TelegramChannel {
                         .map(Vec::len)
                         .unwrap_or(0);
                     let primary = Self::morneven_topic_id(group.get("primaryTopicId"));
-                    group.get("allowMainTopic").and_then(serde_json::Value::as_bool)
+                    group
+                        .get("allowMainTopic")
+                        .and_then(serde_json::Value::as_bool)
                         == Some(false)
                         || allowed > 0
                         || primary != "main"
@@ -963,18 +965,23 @@ impl TelegramChannel {
                     })),
                 "morneven topic_lock_redirect"
             );
-            let thread = if primary == "main" { None } else { Some(primary) };
+            let thread = if primary == "main" {
+                None
+            } else {
+                Some(primary)
+            };
             return Some((chat_id.to_string(), thread));
         }
         ::zeroclaw_log::record!(
             INFO,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                .with_attrs(::serde_json::json!({
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(
+                ::serde_json::json!({
                     "chat": chat_id,
                     "thread": topic_id,
                     "channel": "telegram",
                     "alias": self.alias,
-                })),
+                })
+            ),
             "morneven topic_lock_block"
         );
         None
@@ -1629,7 +1636,11 @@ impl TelegramChannel {
             .and_then(|reply| reply.get("from"))
             .and_then(|from| from.get("username"))
             .and_then(serde_json::Value::as_str)
-            .map(|username| username.trim_start_matches('@').eq_ignore_ascii_case(bot_username))
+            .map(|username| {
+                username
+                    .trim_start_matches('@')
+                    .eq_ignore_ascii_case(bot_username)
+            })
             .unwrap_or(false)
     }
 
@@ -3834,7 +3845,8 @@ impl Channel for TelegramChannel {
             return Ok(());
         }
 
-        self.send_text_chunks(&content, &chat_id, thread_id.as_deref()).await
+        self.send_text_chunks(&content, &chat_id, thread_id.as_deref())
+            .await
     }
 
     async fn listen(&self, tx: tokio::sync::mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
@@ -4710,10 +4722,7 @@ mod tests {
     #[test]
     fn parse_channel_message_id_accepts_telegram_channel_ids() {
         assert_eq!(parse_channel_message_id("42"), Some(42));
-        assert_eq!(
-            parse_channel_message_id("telegram_-100200300_42"),
-            Some(42)
-        );
+        assert_eq!(parse_channel_message_id("telegram_-100200300_42"), Some(42));
         assert_eq!(parse_channel_message_id("telegram_bad"), None);
     }
 

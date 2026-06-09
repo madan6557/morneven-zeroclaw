@@ -198,7 +198,8 @@ fn json_read(path: &Path) -> Option<Value> {
 }
 
 fn json_bytes<T: Serialize + ?Sized>(value: &T) -> io::Result<Vec<u8>> {
-    serde_json::to_vec_pretty(value).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    serde_json::to_vec_pretty(value)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 fn json_write(path: &Path, value: &Value) -> io::Result<()> {
@@ -232,7 +233,12 @@ fn credential_value<'a>(credential: &'a Value, camel: &str, snake: &str) -> Opti
     string_field(credential, camel).or_else(|| string_field(credential, snake))
 }
 
-fn append_provider_toml(out: &mut String, entry: &Value, provider: &str, alias: &str) -> Option<String> {
+fn append_provider_toml(
+    out: &mut String,
+    entry: &Value,
+    provider: &str,
+    alias: &str,
+) -> Option<String> {
     let credentials = entry.get("credentials")?.as_object()?;
     let credential = credentials.get(provider)?;
     let zero_provider = zero_provider_name(provider);
@@ -329,7 +335,10 @@ fn write_zeroclaw_toml_config(
         out.push_str(&format!("channels = [{}]\n", toml_quote(reference)));
     }
     if !cron_aliases.is_empty() {
-        out.push_str(&format!("cron_jobs = {}\n", toml_string_array(&cron_aliases)));
+        out.push_str(&format!(
+            "cron_jobs = {}\n",
+            toml_string_array(&cron_aliases)
+        ));
     }
     out.push('\n');
     out.push_str(&format!("[agents.{agent_alias}.workspace]\n"));
@@ -614,7 +623,11 @@ fn legacy_nanobot_runtime_dirs(identity: &Value) -> Vec<PathBuf> {
 }
 
 fn canonicalize_legacy_nanobot_path(relative_path: &str) -> String {
-    let normalized = relative_path.trim().replace('\\', "/").trim_start_matches('/').to_string();
+    let normalized = relative_path
+        .trim()
+        .replace('\\', "/")
+        .trim_start_matches('/')
+        .to_string();
     let lower = normalized.to_ascii_lowercase();
     if lower.starts_with("sessions/") {
         return format!("legacy/nanobot/{normalized}");
@@ -708,8 +721,7 @@ fn legacy_nanobot_workspace_files(identity: &Value) -> Vec<Value> {
 }
 
 fn is_generated_zeroclaw_file(file: &Value) -> bool {
-    string_field(file, "id")
-        .is_some_and(|id| id.starts_with("zeroclaw-managed-"))
+    string_field(file, "id").is_some_and(|id| id.starts_with("zeroclaw-managed-"))
         || string_field(file, "objectPath")
             .is_some_and(|path| path.starts_with("zeroclaw-managed://"))
 }
@@ -743,40 +755,28 @@ fn runtime_files_for_materialization(
     general_config: &Value,
 ) -> Vec<Value> {
     let mut bundle_files = morneven_translated_files(entry);
-    let has_policy = bundle_files
-        .iter()
-        .any(|file| {
-            string_field(file, "path")
-                .is_some_and(|path| path.eq_ignore_ascii_case("MORNEVEN_POLICY.md"))
-        });
+    let has_policy = bundle_files.iter().any(|file| {
+        string_field(file, "path")
+            .is_some_and(|path| path.eq_ignore_ascii_case("MORNEVEN_POLICY.md"))
+    });
     if !has_policy {
         bundle_files.push(morneven_policy_file(entry, general_config));
     }
-    let has_persona = bundle_files
-        .iter()
-        .any(|file| {
-            string_field(file, "path")
-                .is_some_and(|path| path.eq_ignore_ascii_case("MORNEVEN_PERSONA.md"))
-        });
+    let has_persona = bundle_files.iter().any(|file| {
+        string_field(file, "path")
+            .is_some_and(|path| path.eq_ignore_ascii_case("MORNEVEN_PERSONA.md"))
+    });
     if !has_persona {
         bundle_files.push(morneven_persona_file(entry));
     }
-    let has_cron_summary = bundle_files
-        .iter()
-        .any(|file| {
-            string_field(file, "path")
-                .is_some_and(|path| path.eq_ignore_ascii_case("MORNEVEN_CRON.md"))
-        });
-    if !has_cron_summary
-        && let Some(file) = morneven_cron_file(entry)
-    {
+    let has_cron_summary = bundle_files.iter().any(|file| {
+        string_field(file, "path").is_some_and(|path| path.eq_ignore_ascii_case("MORNEVEN_CRON.md"))
+    });
+    if !has_cron_summary && let Some(file) = morneven_cron_file(entry) {
         bundle_files.push(file);
     }
 
-    merge_runtime_materialization_files(
-        legacy_nanobot_workspace_files(identity),
-        bundle_files,
-    )
+    merge_runtime_materialization_files(legacy_nanobot_workspace_files(identity), bundle_files)
 }
 
 fn morneven_cron_jobs(entry: &Value) -> Vec<Value> {
@@ -978,7 +978,11 @@ fn value_object(value: &Value) -> Option<&Map<String, Value>> {
 }
 
 fn string_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
-    value.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
 }
 
 fn string_array_field(value: &Value, key: &str) -> Vec<String> {
@@ -1041,13 +1045,21 @@ fn runtime_dir_for_identity(identity: &Value) -> PathBuf {
 }
 
 fn normalize_runtime_path(raw: &str) -> io::Result<String> {
-    let normalized = raw.trim().replace('\\', "/").trim_start_matches('/').to_string();
+    let normalized = raw
+        .trim()
+        .replace('\\', "/")
+        .trim_start_matches('/')
+        .to_string();
     if normalized.is_empty() || normalized.len() > 240 {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid runtime file path"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid runtime file path",
+        ));
     }
-    if normalized.chars().any(|ch| {
-        !(ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '/'))
-    }) {
+    if normalized
+        .chars()
+        .any(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '/')))
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "Runtime file path contains unsupported characters",
@@ -1119,7 +1131,11 @@ fn load_manifest(path: &Path) -> RuntimeManifest {
         })
 }
 
-fn write_manifest(path: &Path, files: BTreeMap<String, ManifestFile>, identity: Value) -> io::Result<()> {
+fn write_manifest(
+    path: &Path,
+    files: BTreeMap<String, ManifestFile>,
+    identity: Value,
+) -> io::Result<()> {
     let manifest = RuntimeManifest {
         version: 1,
         synced_at: Some(now_iso()),
@@ -1141,7 +1157,8 @@ fn credential_provider(entry: &Value) -> Option<String> {
 }
 
 fn credential_model(entry: &Value, provider: &str) -> Option<String> {
-    entry.get("credentials")
+    entry
+        .get("credentials")
         .and_then(|credentials| credentials.get(provider))
         .and_then(|credential| {
             string_field(credential, "modelId")
@@ -1151,7 +1168,8 @@ fn credential_model(entry: &Value, provider: &str) -> Option<String> {
 }
 
 fn telegram_root(entry: &Value) -> Option<&Value> {
-    entry.get("channels")
+    entry
+        .get("channels")
         .and_then(|channels| channels.get("telegram"))
 }
 
@@ -1344,7 +1362,9 @@ fn materialize_runtime_entry(
     gateway_port: u16,
 ) -> io::Result<Value> {
     let identity = entry.get("identity").cloned().unwrap_or_else(|| json!({}));
-    let identity_id = string_field(&identity, "id").unwrap_or_default().to_string();
+    let identity_id = string_field(&identity, "id")
+        .unwrap_or_default()
+        .to_string();
     let runtime_dir = runtime_dir_for_identity(&identity);
     let workspace_path = runtime_dir.join("workspace");
     let manifest_path = runtime_dir.join(".morneven-runtime-manifest.json");
@@ -1401,9 +1421,18 @@ fn materialize_runtime_entry(
         }
     }
 
-    write_runtime_config(&config_path, entry, general_config, &workspace_path, gateway_port)?;
+    write_runtime_config(
+        &config_path,
+        entry,
+        general_config,
+        &workspace_path,
+        gateway_port,
+    )?;
     write_zeroclaw_toml_config(&zeroclaw_config_path, entry, &workspace_path, gateway_port)?;
-    json_write(&runtime_dir.join("telegram-topics.json"), &topic_registry_from_entry(entry))?;
+    json_write(
+        &runtime_dir.join("telegram-topics.json"),
+        &topic_registry_from_entry(entry),
+    )?;
     write_manifest(
         &manifest_path,
         written,
@@ -1469,12 +1498,24 @@ fn materialize_morneven_runtime(bundle: &Value) -> io::Result<Value> {
         .get("mainIdentity")
         .or_else(|| bundle.get("activeIdentity"))
         .cloned()
-        .unwrap_or_else(|| entries[0].get("identity").cloned().unwrap_or_else(|| json!({})));
+        .unwrap_or_else(|| {
+            entries[0]
+                .get("identity")
+                .cloned()
+                .unwrap_or_else(|| json!({}))
+        });
     let main_identity_id = string_field(&main_identity, "id")
-        .or_else(|| entries[0].get("identity").and_then(|identity| string_field(identity, "id")))
+        .or_else(|| {
+            entries[0]
+                .get("identity")
+                .and_then(|identity| string_field(identity, "id"))
+        })
         .unwrap_or_default()
         .to_string();
-    let general_config = bundle.get("generalConfig").cloned().unwrap_or_else(|| json!({}));
+    let general_config = bundle
+        .get("generalConfig")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
     let mode = string_field(bundle, "mode")
         .unwrap_or("single-active-personality")
         .to_string();
@@ -1495,7 +1536,12 @@ fn materialize_morneven_runtime(bundle: &Value) -> io::Result<Value> {
         .unwrap_or_else(|| runtimes[0].clone());
     let file_count: usize = runtimes
         .iter()
-        .map(|runtime| runtime.get("fileCount").and_then(Value::as_u64).unwrap_or(0) as usize)
+        .map(|runtime| {
+            runtime
+                .get("fileCount")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize
+        })
         .sum();
     let state = json!({
         "syncedAt": now_iso(),
@@ -1519,7 +1565,10 @@ fn materialize_morneven_runtime(bundle: &Value) -> io::Result<Value> {
     });
     json_write(&runtime_state_path(), &state)?;
     ensure_desired_runtimes(&state)?;
-    append_log(format!("runtime synced: {} runtime(s)", state["runtimeCount"]));
+    append_log(format!(
+        "runtime synced: {} runtime(s)",
+        state["runtimeCount"]
+    ));
     Ok(state)
 }
 
@@ -1672,7 +1721,12 @@ fn set_runtime_action(identity_id: Option<&str>, action: &str) -> io::Result<Des
         "start" => "running",
         "stop" => "stopped",
         "restart" => "running",
-        _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid runtime action")),
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid runtime action",
+            ));
+        }
     };
     if identity_id.is_none() {
         desired.global = target_state.to_string();
@@ -1716,7 +1770,9 @@ fn set_runtime_action(identity_id: Option<&str>, action: &str) -> io::Result<Des
     save_desired_state(&desired)?;
     append_log(format!(
         "gateway action {action}{}",
-        identity_id.map(|id| format!(" for {id}")).unwrap_or_default()
+        identity_id
+            .map(|id| format!(" for {id}"))
+            .unwrap_or_default()
     ));
     Ok(desired)
 }
@@ -1835,7 +1891,9 @@ fn runtime_process_snapshot(identity_id: &str) -> (bool, Option<u32>, Option<i32
 fn spawn_gateway_process(runtime: &Value) -> io::Result<u32> {
     let identity_id = string_field(runtime, "identityId")
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Runtime identityId is missing"))?;
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "Runtime identityId is missing")
+        })?;
     let (running, pid, _) = runtime_process_snapshot(identity_id);
     if running {
         let _ = mark_runtime_started(identity_id, false);
@@ -1864,7 +1922,12 @@ fn spawn_gateway_process(runtime: &Value) -> io::Result<u32> {
         .get("gatewayPort")
         .and_then(Value::as_u64)
         .and_then(|port| u16::try_from(port).ok())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Runtime gatewayPort is missing"))?;
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Runtime gatewayPort is missing",
+            )
+        })?;
     let executable = env::current_exe()?;
     let runtime_log = runtime_log_path(runtime);
     let log_file = fs::OpenOptions::new()
@@ -1929,7 +1992,10 @@ fn stop_external_pid(pid: u32) -> io::Result<()> {
     }
     #[cfg(not(windows))]
     {
-        let status = Command::new("kill").arg("-TERM").arg(pid.to_string()).status()?;
+        let status = Command::new("kill")
+            .arg("-TERM")
+            .arg(pid.to_string())
+            .status()?;
         if !status.success() {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
@@ -1943,7 +2009,9 @@ fn stop_external_pid(pid: u32) -> io::Result<()> {
 fn stop_gateway_process(runtime: &Value) -> io::Result<()> {
     let identity_id = string_field(runtime, "identityId")
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Runtime identityId is missing"))?;
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "Runtime identityId is missing")
+        })?;
     let pid_path = pid_path_for_runtime(runtime);
     let child = runtime_processes().lock().remove(identity_id);
     if let Some(mut child) = child {
@@ -1969,7 +2037,10 @@ fn apply_runtime_process_action(runtime: &Value, action: &str) -> io::Result<Opt
             stop_gateway_process(runtime)?;
             spawn_gateway_process(runtime).map(Some)
         }
-        _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid runtime action")),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid runtime action",
+        )),
     }
 }
 
@@ -1983,7 +2054,9 @@ fn apply_gateway_process_action(action: &str) -> io::Result<Vec<Value>> {
         ));
     }
     for runtime in runtimes {
-        let identity_id = string_field(&runtime, "identityId").unwrap_or_default().to_string();
+        let identity_id = string_field(&runtime, "identityId")
+            .unwrap_or_default()
+            .to_string();
         match apply_runtime_process_action(&runtime, action) {
             Ok(pid) => results.push(json!({
                 "identityId": identity_id,
@@ -2032,7 +2105,11 @@ pub(crate) fn restore_desired_runtimes() {
 fn runtime_uptime_seconds(started_at: Option<&String>) -> Option<i64> {
     let started_at = started_at?;
     let started_at = DateTime::parse_from_rfc3339(started_at).ok()?;
-    Some((Utc::now() - started_at.with_timezone(&Utc)).num_seconds().max(0))
+    Some(
+        (Utc::now() - started_at.with_timezone(&Utc))
+            .num_seconds()
+            .max(0),
+    )
 }
 
 fn runtime_status(runtime: &Value, desired: &DesiredGatewayState) -> Value {
@@ -2042,7 +2119,11 @@ fn runtime_status(runtime: &Value, desired: &DesiredGatewayState) -> Value {
         .map(|entry| entry.state.as_str())
         .unwrap_or("stopped");
     let (process_running, pid, last_exit_code) = runtime_process_snapshot(identity_id);
-    let state = if process_running { "running" } else { "stopped" };
+    let state = if process_running {
+        "running"
+    } else {
+        "stopped"
+    };
     let last_log_line = read_recent_file_lines(&runtime_log_path(runtime), 1)
         .first()
         .cloned()
@@ -2098,7 +2179,12 @@ fn gateway_status() -> Value {
     let runtimes: Vec<Value> = state
         .get("runtimes")
         .and_then(Value::as_array)
-        .map(|items| items.iter().map(|runtime| runtime_status(runtime, &desired)).collect())
+        .map(|items| {
+            items
+                .iter()
+                .map(|runtime| runtime_status(runtime, &desired))
+                .collect()
+        })
         .unwrap_or_default();
     let main = runtimes
         .iter()
@@ -2147,9 +2233,8 @@ fn read_workspace_text(path: &Path) -> io::Result<(String, fs::Metadata)> {
             "Binary files are not supported",
         ));
     }
-    let content = String::from_utf8(raw).map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidData, "File is not valid UTF-8")
-    })?;
+    let content = String::from_utf8(raw)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "File is not valid UTF-8"))?;
     Ok((content, stat))
 }
 
@@ -2188,7 +2273,10 @@ fn workspace_changes_at(workspace_root: &Path, manifest_path: &Path, include_all
             match read_workspace_text(&path) {
                 Ok((content, stat)) => {
                     let hash = content_hash(content.as_bytes());
-                    let base_hash = manifest.files.get(&relative_path).map(|file| file.content_hash.clone());
+                    let base_hash = manifest
+                        .files
+                        .get(&relative_path)
+                        .map(|file| file.content_hash.clone());
                     if !include_all && base_hash.as_deref() == Some(hash.as_str()) {
                         continue;
                     }
@@ -2280,7 +2368,10 @@ fn u64_field_any(value: &Value, keys: &[&str]) -> Option<u64> {
                     .filter(|number| number.is_finite() && *number >= 0.0)
                     .map(|number| number as u64)
             })
-            .or_else(|| raw.as_str().and_then(|text| text.trim().parse::<u64>().ok()))
+            .or_else(|| {
+                raw.as_str()
+                    .and_then(|text| text.trim().parse::<u64>().ok())
+            })
     })
 }
 
@@ -2290,7 +2381,10 @@ fn f64_field_any(value: &Value, keys: &[&str]) -> Option<f64> {
         raw.as_f64()
             .or_else(|| raw.as_i64().map(|number| number as f64))
             .or_else(|| raw.as_u64().map(|number| number as f64))
-            .or_else(|| raw.as_str().and_then(|text| text.trim().parse::<f64>().ok()))
+            .or_else(|| {
+                raw.as_str()
+                    .and_then(|text| text.trim().parse::<f64>().ok())
+            })
             .filter(|number| number.is_finite() && *number >= 0.0)
     })
 }
@@ -2335,23 +2429,43 @@ fn normalized_usage_event(record: &Value, runtime: Option<&Value>) -> Option<Val
         .unwrap_or_default();
     let prompt_tokens = u64_field_any(
         record,
-        &["promptTokens", "prompt_tokens", "inputTokens", "input_tokens"],
+        &[
+            "promptTokens",
+            "prompt_tokens",
+            "inputTokens",
+            "input_tokens",
+        ],
     )
     .or_else(|| {
         u64_field_any(
             usage,
-            &["promptTokens", "prompt_tokens", "inputTokens", "input_tokens"],
+            &[
+                "promptTokens",
+                "prompt_tokens",
+                "inputTokens",
+                "input_tokens",
+            ],
         )
     })
     .unwrap_or(0);
     let completion_tokens = u64_field_any(
         record,
-        &["completionTokens", "completion_tokens", "outputTokens", "output_tokens"],
+        &[
+            "completionTokens",
+            "completion_tokens",
+            "outputTokens",
+            "output_tokens",
+        ],
     )
     .or_else(|| {
         u64_field_any(
             usage,
-            &["completionTokens", "completion_tokens", "outputTokens", "output_tokens"],
+            &[
+                "completionTokens",
+                "completion_tokens",
+                "outputTokens",
+                "output_tokens",
+            ],
         )
     })
     .unwrap_or(0);
@@ -2391,12 +2505,24 @@ fn normalized_usage_event(record: &Value, runtime: Option<&Value>) -> Option<Val
     .unwrap_or_else(|| prompt_tokens.saturating_add(completion_tokens));
     let cost_usd = f64_field_any(
         record,
-        &["costUsd", "cost_usd", "cost", "total_cost", "estimated_cost"],
+        &[
+            "costUsd",
+            "cost_usd",
+            "cost",
+            "total_cost",
+            "estimated_cost",
+        ],
     )
     .or_else(|| {
         f64_field_any(
             usage,
-            &["costUsd", "cost_usd", "cost", "total_cost", "estimated_cost"],
+            &[
+                "costUsd",
+                "cost_usd",
+                "cost",
+                "total_cost",
+                "estimated_cost",
+            ],
         )
     })
     .unwrap_or(0.0);
@@ -2514,7 +2640,9 @@ fn runtime_usage_paths(runtime: &Value) -> Vec<PathBuf> {
         push_usage_path(
             &mut paths,
             &mut seen,
-            PathBuf::from(workspace_path).join("state").join("costs.jsonl"),
+            PathBuf::from(workspace_path)
+                .join("state")
+                .join("costs.jsonl"),
         );
     }
     paths
@@ -2574,7 +2702,10 @@ pub async fn handle_reload(headers: HeaderMap, Json(body): Json<ReloadRequest>) 
                 json!({"ok": false, "error": error.to_string()}),
             ),
         },
-        Err(error) => response(StatusCode::BAD_GATEWAY, json!({"ok": false, "error": error})),
+        Err(error) => response(
+            StatusCode::BAD_GATEWAY,
+            json!({"ok": false, "error": error}),
+        ),
     }
 }
 
@@ -2586,7 +2717,12 @@ pub async fn handle_config_secrets(headers: HeaderMap) -> Response {
     let runtimes: Vec<Value> = state
         .get("runtimes")
         .and_then(Value::as_array)
-        .map(|items| items.iter().map(config_secret_payload_for_runtime).collect())
+        .map(|items| {
+            items
+                .iter()
+                .map(config_secret_payload_for_runtime)
+                .collect()
+        })
         .unwrap_or_default();
     response(StatusCode::OK, json!({"ok": true, "runtimes": runtimes}))
 }
@@ -2616,9 +2752,11 @@ pub async fn handle_workspace_changes(
             items
                 .iter()
                 .map(|runtime| {
-                    let workspace = PathBuf::from(string_field(runtime, "workspacePath").unwrap_or_default());
-                    let manifest = PathBuf::from(string_field(runtime, "runtimePath").unwrap_or_default())
-                        .join(".morneven-runtime-manifest.json");
+                    let workspace =
+                        PathBuf::from(string_field(runtime, "workspacePath").unwrap_or_default());
+                    let manifest =
+                        PathBuf::from(string_field(runtime, "runtimePath").unwrap_or_default())
+                            .join(".morneven-runtime-manifest.json");
                     let changes = workspace_changes_at(&workspace, &manifest, include_all);
                     let mut payload = value_object(&changes).cloned().unwrap_or_default();
                     payload.insert(
@@ -2672,11 +2810,21 @@ pub async fn handle_provider_usage(
         .flatten()
     {
         for path in runtime_usage_paths(runtime) {
-            events.extend(load_usage_events(&path, Some(runtime), start.as_ref(), end.as_ref()));
+            events.extend(load_usage_events(
+                &path,
+                Some(runtime),
+                start.as_ref(),
+                end.as_ref(),
+            ));
         }
     }
     if events.is_empty() {
-        events.extend(load_usage_events(&root_usage_path(), None, start.as_ref(), end.as_ref()));
+        events.extend(load_usage_events(
+            &root_usage_path(),
+            None,
+            start.as_ref(),
+            end.as_ref(),
+        ));
     }
     events.sort_by(|left, right| {
         let left_time = parse_iso_datetime(string_field(left, "recordedAt"));
@@ -2697,7 +2845,10 @@ pub async fn handle_provider_usage(
     )
 }
 
-pub async fn handle_gateway_action(headers: HeaderMap, AxumPath(action): AxumPath<String>) -> Response {
+pub async fn handle_gateway_action(
+    headers: HeaderMap,
+    AxumPath(action): AxumPath<String>,
+) -> Response {
     if let Err(error) = require_morneven_token(&headers) {
         return error;
     }
@@ -3041,7 +3192,10 @@ mod tests {
 
         assert_eq!(files.len(), 1);
         assert_eq!(string_field(&files[0], "path"), Some("AGENTS.md"));
-        assert_eq!(string_field(&files[0], "content"), Some("legacy nanobot agents"));
+        assert_eq!(
+            string_field(&files[0], "content"),
+            Some("legacy nanobot agents")
+        );
     }
 
     #[test]
@@ -3062,7 +3216,10 @@ mod tests {
 
         assert_eq!(files.len(), 1);
         assert_eq!(string_field(&files[0], "path"), Some("AGENTS.md"));
-        assert_eq!(string_field(&files[0], "content"), Some("bot manager agents"));
+        assert_eq!(
+            string_field(&files[0], "content"),
+            Some("bot manager agents")
+        );
     }
 
     #[test]
@@ -3183,10 +3340,7 @@ mod tests {
             Some(true)
         );
         assert_eq!(
-            state
-                .get("groups")
-                .and_then(Value::as_array)
-                .map(Vec::len),
+            state.get("groups").and_then(Value::as_array).map(Vec::len),
             Some(1)
         );
     }
