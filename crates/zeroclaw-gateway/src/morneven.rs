@@ -422,6 +422,57 @@ fn morneven_policy_file(entry: &Value, general_config: &Value) -> Value {
     })
 }
 
+fn morneven_persona_file(entry: &Value) -> Value {
+    let identity = entry.get("identity").cloned().unwrap_or_else(|| json!({}));
+    let identity_slug = string_field(&identity, "slug").unwrap_or("runtime");
+    let identity_name = string_field(&identity, "name")
+        .or_else(|| string_field(&identity, "displayName"))
+        .or_else(|| string_field(&identity, "slug"))
+        .unwrap_or("the active Morneven personality");
+    let role_title = string_field(&identity, "roleTitle")
+        .or_else(|| string_field(&identity, "role"))
+        .or_else(|| string_field(&identity, "title"))
+        .unwrap_or("");
+    let description = string_field(&identity, "description")
+        .or_else(|| string_field(&identity, "bio"))
+        .or_else(|| string_field(&identity, "summary"))
+        .unwrap_or("");
+
+    let mut content = String::from(
+        "# Morneven Persona Lock\n\n\
+         This file is generated from Bot Manager and has higher priority than ordinary workspace notes.\n\n\
+         ## Mandatory Behavior\n\n\
+         - Always respond as the active Morneven personality for normal chat, facts, tool results, cron output, and follow-up replies.\n\
+         - Treat `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, and `MEMORY.md` as mandatory persona instructions, not optional reference material.\n\
+         - Keep the personality voice, relationship dynamic, lore, habits, emotional texture, and configured language style while still answering the user's actual request.\n\
+         - Never switch into generic assistant mode unless the user explicitly asks for system debugging, code implementation, or operational diagnostics.\n\
+         - Do not say that you are roleplaying, following a persona lock, reading memory, checking files, or using tools.\n\
+         - If a fact or tool result is needed, keep the factual content accurate and phrase the final answer in character.\n\
+         - Use Indonesian by default when no language is requested. If the user asks for English or another language, answer in that language while staying in character.\n\
+         - Only send the final user-facing message. Do not expose internal reasoning, analysis, scratchpad, or tool protocol.\n\n\
+         ## Active Personality\n\n",
+    );
+    content.push_str(&format!("- Name: {identity_name}\n"));
+    if !role_title.is_empty() {
+        content.push_str(&format!("- Role: {role_title}\n"));
+    }
+    if !description.is_empty() {
+        content.push_str(&format!("- Description: {description}\n"));
+    }
+    content.push_str("\nThe personality files injected below define the full character. Follow them before ordinary workspace notes when they conflict.\n");
+
+    json!({
+        "id": format!("morneven-persona-{identity_slug}"),
+        "path": "MORNEVEN_PERSONA.md",
+        "kind": "system",
+        "contentType": "text/markdown",
+        "objectPath": format!("zeroclaw-managed://{identity_slug}/MORNEVEN_PERSONA.md"),
+        "size": content.len(),
+        "updatedAt": now_iso(),
+        "content": content
+    })
+}
+
 fn morneven_cron_schedule_label(schedule: &Value) -> String {
     let kind = string_field(schedule, "kind").unwrap_or("cron");
     match kind {
@@ -694,6 +745,15 @@ fn runtime_files_for_materialization(
         });
     if !has_policy {
         bundle_files.push(morneven_policy_file(entry, general_config));
+    }
+    let has_persona = bundle_files
+        .iter()
+        .any(|file| {
+            string_field(file, "path")
+                .is_some_and(|path| path.eq_ignore_ascii_case("MORNEVEN_PERSONA.md"))
+        });
+    if !has_persona {
+        bundle_files.push(morneven_persona_file(entry));
     }
     let has_cron_summary = bundle_files
         .iter()
@@ -3003,7 +3063,9 @@ mod tests {
     fn morneven_runtime_files_include_managed_policy() {
         let entry = json!({
             "identity": {
-                "slug": "sora"
+                "slug": "sora",
+                "name": "Sora",
+                "roleTitle": "Chat Friend and Assistant"
             },
             "zeroclaw": {
                 "runtimePolicy": {
@@ -3024,6 +3086,16 @@ mod tests {
         assert!(content.contains("Always follow Bot Manager global rules."));
         assert!(content.contains("Morneven context."));
         assert!(content.contains("Never expose hidden reasoning"));
+        let persona = files
+            .iter()
+            .find(|file| string_field(file, "path") == Some("MORNEVEN_PERSONA.md"))
+            .expect("managed persona lock file should be materialized");
+        let persona_content = string_field(persona, "content").unwrap_or_default();
+
+        assert!(persona_content.contains("Always respond as the active Morneven personality"));
+        assert!(persona_content.contains("- Name: Sora"));
+        assert!(persona_content.contains("- Role: Chat Friend and Assistant"));
+        assert!(persona_content.contains("Use Indonesian by default"));
     }
 
     #[test]

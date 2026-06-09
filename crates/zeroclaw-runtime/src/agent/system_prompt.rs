@@ -20,7 +20,11 @@ fn load_openclaw_bootstrap_files(
         "The following workspace files define your identity, behavior, and context. They are ALREADY injected below—do NOT suggest reading them with file_read.\n\n",
     );
 
-    for filename in ["MORNEVEN_POLICY.md", "MORNEVEN_CRON.md"] {
+    for filename in [
+        "MORNEVEN_POLICY.md",
+        "MORNEVEN_PERSONA.md",
+        "MORNEVEN_CRON.md",
+    ] {
         if workspace_dir.join(filename).exists() {
             inject_workspace_file(prompt, workspace_dir, filename, max_chars_per_file);
         }

@@ -13787,15 +13787,23 @@ BTC is currently around $65,000 based on latest tool output."#
             "# Morneven Cron Jobs\n\n- usd-idr-siang",
         )
         .unwrap();
+        std::fs::write(
+            ws.path().join("MORNEVEN_PERSONA.md"),
+            "# Morneven Persona Lock\n\nAlways stay in character as Sola.",
+        )
+        .unwrap();
 
         let prompt = build_system_prompt(ws.path(), "test-model", &[], &[], None, None);
         let policy_idx = prompt.find("### MORNEVEN_POLICY.md").unwrap();
+        let persona_idx = prompt.find("### MORNEVEN_PERSONA.md").unwrap();
         let cron_idx = prompt.find("### MORNEVEN_CRON.md").unwrap();
         let agents_idx = prompt.find("### AGENTS.md").unwrap();
 
         assert!(policy_idx < agents_idx);
+        assert!(persona_idx < agents_idx);
         assert!(cron_idx < agents_idx);
         assert!(prompt.contains("Bot Manager global rules win."));
+        assert!(prompt.contains("Always stay in character as Sola."));
         assert!(prompt.contains("usd-idr-siang"));
     }
 
