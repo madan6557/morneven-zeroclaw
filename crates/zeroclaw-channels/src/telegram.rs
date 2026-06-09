@@ -172,6 +172,21 @@ fn build_telegram_ack_reaction_request(
     })
 }
 
+fn build_telegram_clear_reaction_request(chat_id: &str, message_id: i64) -> serde_json::Value {
+    serde_json::json!({
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "reaction": []
+    })
+}
+
+fn parse_channel_message_id(message_id: &str) -> Option<i64> {
+    message_id
+        .parse::<i64>()
+        .ok()
+        .or_else(|| message_id.rsplit('_').next()?.parse::<i64>().ok())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TelegramAttachmentKind {
     Image,
@@ -1589,6 +1604,34 @@ impl TelegramChannel {
             .unwrap_or(false)
     }
 
+    fn is_topic_root_reply(message: &serde_json::Value) -> bool {
+        let Some(reply) = message.get("reply_to_message") else {
+            return false;
+        };
+        let reply_mid = reply.get("message_id").and_then(serde_json::Value::as_i64);
+        let thread_id = message
+            .get("message_thread_id")
+            .and_then(serde_json::Value::as_i64);
+        matches!((reply_mid, thread_id), (Some(rmid), Some(tid)) if rmid == tid)
+    }
+
+    fn is_reply_to_bot(message: &serde_json::Value, bot_username: &str) -> bool {
+        if Self::is_topic_root_reply(message) {
+            return false;
+        }
+        let bot_username = bot_username.trim_start_matches('@');
+        if bot_username.is_empty() {
+            return false;
+        }
+        message
+            .get("reply_to_message")
+            .and_then(|reply| reply.get("from"))
+            .and_then(|from| from.get("username"))
+            .and_then(serde_json::Value::as_str)
+            .map(|username| username.trim_start_matches('@').eq_ignore_ascii_case(bot_username))
+            .unwrap_or(false)
+    }
+
     /// Apply the `mention_only` gate to a non-text update (photo / document /
     /// voice) using its caption as the channel for the mention.
     ///
@@ -1618,6 +1661,9 @@ impl TelegramChannel {
         }
         let bot_username_guard = self.bot_username.lock();
         let bot_username = bot_username_guard.as_ref()?;
+        if Self::is_reply_to_bot(message, bot_username) {
+            return Some(caption.map(String::from));
+        }
         let caption = caption?;
         if !Self::contains_bot_mention(caption, bot_username) {
             return None;
@@ -2333,13 +2379,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
         // produces a spurious `> @user:\n> [Message]` blockquote prefix that
         // downstream reply-intent classification reads as "user is replying
         // to someone else" and rejects.
-        let reply_mid = reply.get("message_id").and_then(serde_json::Value::as_i64);
-        let thread_id = message
-            .get("message_thread_id")
-            .and_then(serde_json::Value::as_i64);
-        if let (Some(rmid), Some(tid)) = (reply_mid, thread_id)
-            && rmid == tid
-        {
+        if Self::is_topic_root_reply(message) {
             return None;
         }
 
@@ -2411,13 +2451,19 @@ Allowlist Telegram username (without '@') or numeric user ID.",
         }
 
         let is_group = Self::is_group_message(message);
+        let mut bot_username_for_gate = None;
+        let mut is_mention_or_reply_to_self = false;
         if self.mention_only && is_group {
             let bot_username = self.bot_username.lock();
             if let Some(ref bot_username) = *bot_username {
-                if !Self::contains_bot_mention(text, bot_username) {
-                    return None;
-                }
+                let is_mentioned = Self::contains_bot_mention(text, bot_username);
+                let is_reply_to_self = Self::is_reply_to_bot(message, bot_username);
+                is_mention_or_reply_to_self = is_mentioned || is_reply_to_self;
+                bot_username_for_gate = Some(bot_username.clone());
             } else {
+                return None;
+            }
+            if !is_mention_or_reply_to_self {
                 return None;
             }
         }
@@ -2447,8 +2493,10 @@ Allowlist Telegram username (without '@') or numeric user ID.",
         };
 
         let content = if self.mention_only && is_group {
-            let bot_username = self.bot_username.lock();
-            let bot_username = bot_username.as_ref()?;
+            let bot_username = bot_username_for_gate.as_ref()?;
+            if !is_mention_or_reply_to_self {
+                return None;
+            }
             Self::normalize_incoming_content(text, bot_username)?
         } else {
             text.to_string()
@@ -4098,17 +4146,22 @@ Ensure only one `zeroclaw` process is using this bot token."
                         );
                     }
 
-                    // Send "typing" indicator immediately when we receive a message
-                    let typing_body = serde_json::json!({
-                        "chat_id": &msg.reply_target,
+                    let (typing_chat_id, typing_thread_id) =
+                        Self::parse_reply_target(&msg.reply_target);
+                    let mut typing_body = serde_json::json!({
+                        "chat_id": typing_chat_id,
                         "action": "typing"
                     });
+                    if let Some(tid) = typing_thread_id.as_deref() {
+                        typing_body["message_thread_id"] =
+                            serde_json::Value::String(tid.to_string());
+                    }
                     let _ = self
                         .http_client()
                         .post(self.api_url("sendChatAction"))
                         .json(&typing_body)
                         .send()
-                        .await; // Ignore errors for typing indicator
+                        .await;
 
                     if tx.send(msg).await.is_err() {
                         return Ok(());
@@ -4153,16 +4206,18 @@ Ensure only one `zeroclaw` process is using this bot token."
 
         let client = self.http_client();
         let url = self.api_url("sendChatAction");
-        let chat_id = recipient.to_string();
+        let (chat_id, thread_id) = Self::parse_reply_target(recipient);
 
         let handle = zeroclaw_spawn::spawn!(async move {
             loop {
-                let body = serde_json::json!({
+                let mut body = serde_json::json!({
                     "chat_id": &chat_id,
                     "action": "typing"
                 });
+                if let Some(tid) = thread_id.as_deref() {
+                    body["message_thread_id"] = serde_json::Value::String(tid.to_string());
+                }
                 let _ = client.post(&url).json(&body).send().await;
-                // Telegram typing indicator expires after 5s; refresh at 4s
                 tokio::time::sleep(Duration::from_secs(4)).await;
             }
         });
@@ -4179,6 +4234,56 @@ Ensure only one `zeroclaw` process is using this bot token."
             handle.abort();
         }
         Ok(())
+    }
+
+    async fn add_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> anyhow::Result<()> {
+        let (chat_id, _) = Self::parse_reply_target(channel_id);
+        let Some(message_id) = parse_channel_message_id(message_id) else {
+            return Ok(());
+        };
+        let body = build_telegram_ack_reaction_request(&chat_id, message_id, emoji);
+        let response = self
+            .http_client()
+            .post(self.api_url("setMessageReaction"))
+            .json(&body)
+            .send()
+            .await?;
+        if response.status().is_success() {
+            return Ok(());
+        }
+        let status = response.status();
+        let err_body = response.text().await.unwrap_or_default();
+        anyhow::bail!("Telegram setMessageReaction failed ({status}): {err_body}");
+    }
+
+    async fn remove_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        _emoji: &str,
+    ) -> anyhow::Result<()> {
+        let (chat_id, _) = Self::parse_reply_target(channel_id);
+        let Some(message_id) = parse_channel_message_id(message_id) else {
+            return Ok(());
+        };
+        let body = build_telegram_clear_reaction_request(&chat_id, message_id);
+        let response = self
+            .http_client()
+            .post(self.api_url("setMessageReaction"))
+            .json(&body)
+            .send()
+            .await?;
+        if response.status().is_success() {
+            return Ok(());
+        }
+        let status = response.status();
+        let err_body = response.text().await.unwrap_or_default();
+        anyhow::bail!("Telegram clear reaction failed ({status}): {err_body}");
     }
 
     async fn request_approval(
@@ -4591,6 +4696,24 @@ mod tests {
         assert_eq!(body["message_id"], 42);
         assert_eq!(body["reaction"][0]["type"], "emoji");
         assert_eq!(body["reaction"][0]["emoji"], "⚡️");
+    }
+
+    #[test]
+    fn telegram_clear_reaction_request_shape() {
+        let body = build_telegram_clear_reaction_request("-100200300", 42);
+        assert_eq!(body["chat_id"], "-100200300");
+        assert_eq!(body["message_id"], 42);
+        assert_eq!(body["reaction"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn parse_channel_message_id_accepts_telegram_channel_ids() {
+        assert_eq!(parse_channel_message_id("42"), Some(42));
+        assert_eq!(
+            parse_channel_message_id("telegram_-100200300_42"),
+            Some(42)
+        );
+        assert_eq!(parse_channel_message_id("telegram_bad"), None);
     }
 
     #[test]
@@ -5881,6 +6004,92 @@ mod tests {
     }
 
     #[test]
+    fn parse_update_message_mention_only_group_allows_reply_to_bot_without_mention() {
+        let ch = TelegramChannel::new(
+            "token".into(),
+            "telegram_test_alias",
+            Arc::new(|| vec!["*".into()]),
+            true,
+        );
+        {
+            let mut cache = ch.bot_username.lock();
+            *cache = Some("mybot".to_string());
+        }
+
+        let update = serde_json::json!({
+            "update_id": 13,
+            "message": {
+                "message_id": 47,
+                "text": "please continue",
+                "from": {
+                    "id": 555,
+                    "username": "alice"
+                },
+                "chat": {
+                    "id": -100_200_300,
+                    "type": "supergroup"
+                },
+                "reply_to_message": {
+                    "message_id": 46,
+                    "from": {
+                        "id": 777,
+                        "is_bot": true,
+                        "username": "MyBot"
+                    },
+                    "text": "previous bot answer"
+                }
+            }
+        });
+
+        let parsed = ch
+            .parse_update_message(&update)
+            .expect("reply to this bot should pass mention gate");
+        assert!(parsed.content.contains("please continue"));
+        assert!(parsed.content.contains("> @MyBot:"));
+    }
+
+    #[test]
+    fn parse_update_message_mention_only_group_rejects_reply_to_other_bot() {
+        let ch = TelegramChannel::new(
+            "token".into(),
+            "telegram_test_alias",
+            Arc::new(|| vec!["*".into()]),
+            true,
+        );
+        {
+            let mut cache = ch.bot_username.lock();
+            *cache = Some("mybot".to_string());
+        }
+
+        let update = serde_json::json!({
+            "update_id": 14,
+            "message": {
+                "message_id": 48,
+                "text": "please continue",
+                "from": {
+                    "id": 555,
+                    "username": "alice"
+                },
+                "chat": {
+                    "id": -100_200_300,
+                    "type": "supergroup"
+                },
+                "reply_to_message": {
+                    "message_id": 47,
+                    "from": {
+                        "id": 778,
+                        "is_bot": true,
+                        "username": "otherbot"
+                    },
+                    "text": "other bot answer"
+                }
+            }
+        });
+
+        assert!(ch.parse_update_message(&update).is_none());
+    }
+
+    #[test]
     fn telegram_is_group_message_detects_groups() {
         let group_msg = serde_json::json!({
             "chat": { "type": "group" }
@@ -5965,6 +6174,34 @@ mod tests {
                 .is_none(),
             "caption mentioning a different bot ⇒ reject"
         );
+    }
+
+    #[test]
+    fn check_media_mention_gate_allows_reply_to_bot_without_caption() {
+        let ch = TelegramChannel::new(
+            "token".into(),
+            "default",
+            std::sync::Arc::new(|| vec!["*".into()]),
+            true,
+        );
+        {
+            let mut cache = ch.bot_username.lock();
+            *cache = Some("mybot".to_string());
+        }
+        let message = serde_json::json!({
+            "message_id": 2,
+            "from": { "id": 1, "username": "alice" },
+            "chat": { "id": -1, "type": "supergroup" },
+            "reply_to_message": {
+                "message_id": 1,
+                "from": { "id": 2, "is_bot": true, "username": "mybot" },
+                "text": "previous bot answer"
+            }
+        });
+
+        let gate = ch.check_media_mention_gate(&message, None);
+
+        assert_eq!(gate, Some(None));
     }
 
     /// When the caption mentions the bot, the gate admits and returns the

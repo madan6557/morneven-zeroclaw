@@ -256,7 +256,7 @@ fn append_telegram_toml(out: &mut String, entry: &Value, alias: &str) -> Option<
     out.push_str("enabled = true\n");
     out.push_str(&format!("bot_token = {}\n", toml_quote(token)));
     out.push_str("mention_only = true\n");
-    out.push_str("ack_reactions = false\n\n");
+    out.push_str("ack_reactions = true\n\n");
     let allowed_peers = telegram_allowed_peers_for_alias(entry, alias);
     if !allowed_peers.is_empty() {
         out.push_str(&format!("[peer_groups.telegram_{alias}]\n"));
@@ -298,6 +298,8 @@ fn write_zeroclaw_toml_config(
     out.push_str("host = \"127.0.0.1\"\n");
     out.push_str(&format!("port = {gateway_port}\n"));
     out.push_str("require_pairing = false\n\n");
+    out.push_str("[runtime]\n");
+    out.push_str("reasoning_enabled = false\n\n");
     append_morneven_risk_profile_toml(&mut out);
     out.push_str("[runtime_profiles.default]\n");
     out.push_str("agentic = true\n\n");
@@ -2761,6 +2763,7 @@ mod tests {
         assert!(toml.contains("enabled = true"));
         assert!(toml.contains("bot_token = \"123:ABC\""));
         assert!(toml.contains("mention_only = true"));
+        assert!(toml.contains("ack_reactions = true"));
     }
 
     #[test]
@@ -2871,6 +2874,8 @@ mod tests {
         assert!(toml.contains("auto_approve = [\"*\"]"));
         assert!(toml.contains("always_ask = []"));
         assert!(!toml.contains("allowed_tools = [\"*\"]"));
+        assert!(toml.contains("[runtime]"));
+        assert!(toml.contains("reasoning_enabled = false"));
     }
 
     #[test]
@@ -2924,6 +2929,7 @@ mod tests {
         assert!(toml.contains("[runtime_profiles.default.thinking]"));
         assert!(toml.contains("default_level = \"off\""));
         assert!(toml.contains("native_thinking = false"));
+        assert!(toml.contains("reasoning_enabled = false"));
     }
 
     #[test]

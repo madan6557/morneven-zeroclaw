@@ -2664,11 +2664,23 @@ fn visible_answer_start(text: &str) -> Option<usize> {
         "\njadi ",
         "\nfinal answer:",
         "\nanswer:",
+        "\nsure,",
+        "\nhere is",
+        "\nhere's",
+        "\nthe answer is",
+        "\nyes,",
+        "\nno,",
         "benar,",
         "benar ",
         "oke,",
         "baik,",
         "ini dia",
+        "sure,",
+        "here is",
+        "here's",
+        "the answer is",
+        "yes,",
+        "no,",
     ];
 
     MARKERS
@@ -17702,6 +17714,26 @@ This is an example JSON object for profile settings."#;
         assert!(result.contains("Bot Interaction Rules:"));
         assert!(!result.contains("The user is saying"));
         assert!(!result.contains("Let me check"));
+    }
+
+    #[test]
+    fn sanitize_channel_response_preserves_english_final_answer() {
+        let tools: Vec<Box<dyn Tool>> = Vec::new();
+        let leaked = "The user asked me to answer in English. I should respond directly.\n\nHere is the English response the user requested.";
+
+        let result = sanitize_channel_response(leaked, &tools);
+
+        assert_eq!(result, "Here is the English response the user requested.");
+    }
+
+    #[test]
+    fn sanitize_channel_response_keeps_clean_english_answer() {
+        let tools: Vec<Box<dyn Tool>> = Vec::new();
+        let clean = "Here is the short English answer.";
+
+        let result = sanitize_channel_response(clean, &tools);
+
+        assert_eq!(result, clean);
     }
 
     #[test]
