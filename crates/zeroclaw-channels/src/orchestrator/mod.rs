@@ -4432,12 +4432,15 @@ async fn process_channel_message_body(
             collector: std::sync::Arc::clone(&tool_receipts_collector),
         }
     });
+    let direct_delivery_tracker = crate::sanitizing_channel::new_direct_delivery_tracker();
     let (llm_result, fallback_info) = scope_provider_fallback(async {
         let llm_result = loop {
             let loop_result = tokio::select! {
                 () = cancellation_token.cancelled() => LlmExecutionResult::Cancelled,
                 result = tokio::time::timeout(
                     Duration::from_secs(timeout_budget_secs),
+                    crate::sanitizing_channel::scope_direct_delivery_tracking(
+                        Arc::clone(&direct_delivery_tracker),
                     scope_thread_id(
                         msg.interruption_scope_id.clone()
                             .or_else(|| msg.thread_ts.clone())
@@ -4493,6 +4496,7 @@ async fn process_channel_message_body(
                         ctx.receipt_generator
                             .as_ref()
                             .map(|_| tool_receipts_collector.as_ref()),
+                    ),
                     ),
                     ),
                     ),
@@ -4717,6 +4721,27 @@ async fn process_channel_message_body(
                 &msg.channel,
                 &msg.reply_target,
             );
+            if let Some(channel) = target_channel.as_ref()
+                && crate::sanitizing_channel::direct_delivery_seen(
+                    &direct_delivery_tracker,
+                    channel.name(),
+                    &msg.reply_target,
+                )
+            {
+                ::zeroclaw_log::record!(
+                    INFO,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_attrs(::serde_json::json!({
+                            "channel": channel.name(),
+                            "reply_target": msg.reply_target,
+                        })),
+                    "final response suppressed after direct channel delivery"
+                );
+                if let Some(ref draft_id) = draft_message_id {
+                    let _ = channel.cancel_draft(&msg.reply_target, draft_id).await;
+                }
+                return;
+            }
 
             // Append a footer when the response was served by a different model_provider family.
             // Intra-family fallbacks (e.g. minimax → minimax-cn) are suppressed.

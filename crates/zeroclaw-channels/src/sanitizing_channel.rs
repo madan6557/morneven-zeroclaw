@@ -1,4 +1,6 @@
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::future::Future;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -7,8 +9,39 @@ use zeroclaw_api::attribution::{Attributable, Role};
 use zeroclaw_api::channel::{Channel, ChannelMessage, SendMessage};
 use zeroclaw_api::delivery_sanitizer::{sanitize_delivery_text, sanitize_delivery_text_partial};
 
+pub type DirectDeliveryTracker = Arc<Mutex<HashSet<String>>>;
+
+tokio::task_local! {
+    static DIRECT_DELIVERY_TARGETS: DirectDeliveryTracker;
+}
+
 pub struct SanitizingChannel {
     inner: Arc<dyn Channel>,
+}
+
+pub fn new_direct_delivery_tracker() -> DirectDeliveryTracker {
+    Arc::new(Mutex::new(HashSet::new()))
+}
+
+pub async fn scope_direct_delivery_tracking<F>(
+    tracker: DirectDeliveryTracker,
+    future: F,
+) -> F::Output
+where
+    F: Future,
+{
+    DIRECT_DELIVERY_TARGETS.scope(tracker, future).await
+}
+
+pub fn direct_delivery_seen(
+    tracker: &DirectDeliveryTracker,
+    channel: &str,
+    recipient: &str,
+) -> bool {
+    tracker
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .contains(&delivery_target_key(channel, recipient))
 }
 
 impl SanitizingChannel {
@@ -21,6 +54,7 @@ impl SanitizingChannel {
     }
 
     fn sanitize_send_message(&self, message: &SendMessage) -> SendMessage {
+        record_direct_delivery(self.inner.name(), &message.recipient);
         let sanitized = sanitize_delivery_text(&message.content);
         if sanitized.changed {
             log_sanitized_delivery(self.inner.name(), sanitized.blocked, message.content.len());
@@ -63,6 +97,19 @@ impl SanitizingChannel {
             Some(sanitized.text)
         }
     }
+}
+
+fn record_direct_delivery(channel: &str, recipient: &str) {
+    let _ = DIRECT_DELIVERY_TARGETS.try_with(|targets| {
+        targets
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .insert(delivery_target_key(channel, recipient));
+    });
+}
+
+fn delivery_target_key(channel: &str, recipient: &str) -> String {
+    format!("{}|{}", channel.to_ascii_lowercase(), recipient)
 }
 
 fn delivery_sanitizer_enabled() -> bool {
@@ -308,6 +355,24 @@ mod tests {
             .unwrap();
 
         assert_eq!(inner.sent.lock()[0], "📊 USD/IDR - Pagi");
+    }
+
+    #[tokio::test]
+    async fn send_records_direct_delivery_target_inside_scope() {
+        let tracker = new_direct_delivery_tracker();
+        let inner = Arc::new(RecordingChannel::default());
+        let wrapped = SanitizingChannel { inner };
+
+        scope_direct_delivery_tracking(tracker.clone(), async {
+            wrapped
+                .send(&SendMessage::new("visible", "same-target"))
+                .await
+                .unwrap();
+        })
+        .await;
+
+        assert!(direct_delivery_seen(&tracker, "cli", "same-target"));
+        assert!(!direct_delivery_seen(&tracker, "cli", "other-target"));
     }
 
     #[tokio::test]
