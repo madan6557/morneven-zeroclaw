@@ -5537,7 +5537,7 @@ fn build_channel_by_id(
 ) -> Result<Arc<dyn Channel>> {
     #[allow(unused_variables)]
     let config = config_arc.read();
-    match channel_id {
+    let channel: Arc<dyn Channel> = match channel_id {
         #[cfg(feature = "channel-telegram")]
         "telegram" => {
             let tg = config
@@ -5552,7 +5552,7 @@ fn build_channel_by_id(
                 let alias = alias.clone();
                 Arc::new(move || cfg_arc.read().channel_external_peers("telegram", &alias))
             };
-            Ok(Arc::new(
+            Ok::<Arc<dyn Channel>, anyhow::Error>(Arc::new(
                 TelegramChannel::new(
                     tg.bot_token.clone(),
                     alias.clone(),
@@ -5586,7 +5586,7 @@ fn build_channel_by_id(
                 let alias = alias.clone();
                 Arc::new(move || cfg_arc.read().channel_external_peers("discord", &alias))
             };
-            Ok(Arc::new(
+            Ok::<Arc<dyn Channel>, anyhow::Error>(Arc::new(
                 DiscordChannel::new(
                     dc.bot_token.clone(),
                     dc.guild_ids.clone(),
@@ -5624,7 +5624,7 @@ fn build_channel_by_id(
                 let alias = alias.clone();
                 Arc::new(move || cfg_arc.read().channel_external_peers("slack", &alias))
             };
-            Ok(Arc::new(
+            Ok::<Arc<dyn Channel>, anyhow::Error>(Arc::new(
                 SlackChannel::new(
                     sl.bot_token.clone(),
                     sl.app_token.clone(),
@@ -5657,7 +5657,7 @@ fn build_channel_by_id(
                 let alias = alias.clone();
                 Arc::new(move || cfg_arc.read().channel_external_peers("mattermost", &alias))
             };
-            Ok(Arc::new(
+            Ok::<Arc<dyn Channel>, anyhow::Error>(Arc::new(
                 MattermostChannel::new(
                     mm.url.clone(),
                     mm.bot_token.clone(),
@@ -5690,7 +5690,7 @@ fn build_channel_by_id(
                 let alias = alias.clone();
                 Arc::new(move || cfg_arc.read().channel_external_peers("signal", &alias))
             };
-            Ok(Arc::new(
+            Ok::<Arc<dyn Channel>, anyhow::Error>(Arc::new(
                 SignalChannel::new(
                     sg.http_url.clone(),
                     sg.account.clone(),
@@ -5728,7 +5728,7 @@ fn build_channel_by_id(
                     Arc::new(move || cfg_arc.read().channel_external_peers("matrix", &alias))
                 };
                 let ack = mx.ack_reactions.unwrap_or(config.channels.ack_reactions);
-                Ok(Arc::new(
+                Ok::<Arc<dyn Channel>, anyhow::Error>(Arc::new(
                     MatrixChannel::new(mx.clone(), alias, peer_resolver, state_dir)?
                         .with_transcription(config.transcription.clone())
                         .with_workspace_dir(config.data_dir.clone())
@@ -5759,7 +5759,11 @@ fn build_channel_by_id(
                     let alias = alias.clone();
                     Arc::new(move || cfg_arc.read().channel_external_peers("whatsapp", &alias))
                 };
-                Ok(Arc::new(WhatsAppWebChannel::new(wa, alias, peer_resolver)))
+                Ok::<Arc<dyn Channel>, anyhow::Error>(Arc::new(WhatsAppWebChannel::new(
+                    wa,
+                    alias,
+                    peer_resolver,
+                )))
             }
             #[cfg(not(feature = "whatsapp-web"))]
             {
@@ -5779,7 +5783,7 @@ fn build_channel_by_id(
                 let alias = alias.clone();
                 Arc::new(move || cfg_arc.read().channel_external_peers("qq", &alias))
             };
-            Ok(Arc::new(QQChannel::new(
+            Ok::<Arc<dyn Channel>, anyhow::Error>(Arc::new(QQChannel::new(
                 qq.app_id.clone(),
                 qq.app_secret.clone(),
                 alias,
@@ -5804,7 +5808,11 @@ fn build_channel_by_id(
                     let alias = alias.clone();
                     Arc::new(move || cfg_arc.read().channel_external_peers("lark", &alias))
                 };
-                Ok(Arc::new(LarkChannel::from_config(lk, alias, peer_resolver)))
+                Ok::<Arc<dyn Channel>, anyhow::Error>(Arc::new(LarkChannel::from_config(
+                    lk,
+                    alias,
+                    peer_resolver,
+                )))
             }
             #[cfg(not(feature = "channel-lark"))]
             {
@@ -5824,7 +5832,7 @@ fn build_channel_by_id(
                 let alias = alias.clone();
                 Arc::new(move || cfg_arc.read().channel_external_peers("dingtalk", &alias))
             };
-            Ok(Arc::new(
+            Ok::<Arc<dyn Channel>, anyhow::Error>(Arc::new(
                 DingTalkChannel::new(
                     dt.client_id.clone(),
                     dt.client_secret.clone(),
@@ -5851,7 +5859,7 @@ fn build_channel_by_id(
                 let alias = alias.clone();
                 Arc::new(move || cfg_arc.read().channel_external_peers("wecom", &alias))
             };
-            Ok(Arc::new(WeComChannel::new(
+            Ok::<Arc<dyn Channel>, anyhow::Error>(Arc::new(WeComChannel::new(
                 wc.webhook_key.clone(),
                 alias,
                 peer_resolver,
@@ -5897,7 +5905,7 @@ fn build_channel_by_id(
                     peers
                 })
             };
-            Ok(Arc::new(WeComWsChannel::new_with_alias(
+            Ok::<Arc<dyn Channel>, anyhow::Error>(Arc::new(WeComWsChannel::new_with_alias(
                 wc,
                 alias.clone(),
                 peer_resolver,
@@ -5926,7 +5934,7 @@ fn build_channel_by_id(
                 let alias = alias.clone();
                 Arc::new(move || cfg_arc.read().channel_external_peers("wechat", &alias))
             };
-            Ok(Arc::new(
+            Ok::<Arc<dyn Channel>, anyhow::Error>(Arc::new(
                 WeChatChannel::new(
                     alias,
                     peer_resolver,
@@ -5959,7 +5967,7 @@ fn build_channel_by_id(
                         .channel_external_peers("nextcloud_talk", &alias)
                 })
             };
-            Ok(Arc::new(
+            Ok::<Arc<dyn Channel>, anyhow::Error>(Arc::new(
                 NextcloudTalkChannel::new_with_proxy(
                     nc.base_url.clone(),
                     nc.app_token.clone(),
@@ -5988,7 +5996,7 @@ fn build_channel_by_id(
                 let alias = alias.clone();
                 Arc::new(move || cfg_arc.read().channel_external_peers("wati", &alias))
             };
-            Ok(Arc::new(WatiChannel::new_with_proxy(
+            Ok::<Arc<dyn Channel>, anyhow::Error>(Arc::new(WatiChannel::new_with_proxy(
                 wati_cfg.api_token.clone(),
                 wati_cfg.api_url.clone(),
                 wati_cfg.tenant_id.clone(),
@@ -6014,7 +6022,7 @@ fn build_channel_by_id(
                 let alias = alias.clone();
                 Arc::new(move || cfg_arc.read().channel_external_peers("linq", &alias))
             };
-            Ok(Arc::new(LinqChannel::new(
+            Ok::<Arc<dyn Channel>, anyhow::Error>(Arc::new(LinqChannel::new(
                 lq.api_token.clone(),
                 lq.from_phone.clone(),
                 alias,
@@ -6038,7 +6046,7 @@ fn build_channel_by_id(
                 let alias = alias.clone();
                 Arc::new(move || cfg_arc.read().channel_external_peers("email", &alias))
             };
-            Ok(Arc::new(EmailChannel::new(
+            Ok::<Arc<dyn Channel>, anyhow::Error>(Arc::new(EmailChannel::new(
                 em.clone(),
                 alias,
                 peer_resolver,
@@ -6061,7 +6069,7 @@ fn build_channel_by_id(
                 let alias = alias.clone();
                 Arc::new(move || cfg_arc.read().channel_external_peers("gmail_push", &alias))
             };
-            Ok(Arc::new(GmailPushChannel::new(
+            Ok::<Arc<dyn Channel>, anyhow::Error>(Arc::new(GmailPushChannel::new(
                 gp.clone(),
                 alias,
                 peer_resolver,
@@ -6084,20 +6092,22 @@ fn build_channel_by_id(
                 let alias = alias.clone();
                 Arc::new(move || cfg_arc.read().channel_external_peers("irc", &alias))
             };
-            Ok(Arc::new(IrcChannel::new(crate::irc::IrcChannelConfig {
-                server: irc_cfg.server.clone(),
-                port: irc_cfg.port,
-                nickname: irc_cfg.nickname.clone(),
-                username: irc_cfg.username.clone(),
-                channels: irc_cfg.channels.clone(),
-                alias,
-                peer_resolver,
-                server_password: irc_cfg.server_password.clone(),
-                nickserv_password: irc_cfg.nickserv_password.clone(),
-                sasl_password: irc_cfg.sasl_password.clone(),
-                verify_tls: irc_cfg.verify_tls.unwrap_or(true),
-                mention_only: irc_cfg.mention_only,
-            })))
+            Ok::<Arc<dyn Channel>, anyhow::Error>(Arc::new(IrcChannel::new(
+                crate::irc::IrcChannelConfig {
+                    server: irc_cfg.server.clone(),
+                    port: irc_cfg.port,
+                    nickname: irc_cfg.nickname.clone(),
+                    username: irc_cfg.username.clone(),
+                    channels: irc_cfg.channels.clone(),
+                    alias,
+                    peer_resolver,
+                    server_password: irc_cfg.server_password.clone(),
+                    nickserv_password: irc_cfg.nickserv_password.clone(),
+                    sasl_password: irc_cfg.sasl_password.clone(),
+                    verify_tls: irc_cfg.verify_tls.unwrap_or(true),
+                    mention_only: irc_cfg.mention_only,
+                },
+            )))
         }
         #[cfg(not(feature = "channel-irc"))]
         "irc" => {
@@ -6116,7 +6126,7 @@ fn build_channel_by_id(
                 let alias = alias.clone();
                 Arc::new(move || cfg_arc.read().channel_external_peers("twitter", &alias))
             };
-            Ok(Arc::new(TwitterChannel::new(
+            Ok::<Arc<dyn Channel>, anyhow::Error>(Arc::new(TwitterChannel::new(
                 tw.bearer_token.clone(),
                 alias,
                 peer_resolver,
@@ -6139,7 +6149,7 @@ fn build_channel_by_id(
                 let alias = alias.clone();
                 Arc::new(move || cfg_arc.read().channel_external_peers("mochat", &alias))
             };
-            Ok(Arc::new(MochatChannel::new(
+            Ok::<Arc<dyn Channel>, anyhow::Error>(Arc::new(MochatChannel::new(
                 mc.api_url.clone(),
                 mc.api_token.clone(),
                 alias,
@@ -6162,7 +6172,10 @@ fn build_channel_by_id(
                 let alias = alias.clone();
                 Arc::new(move || cfg_arc.read().channel_external_peers("imessage", &alias))
             };
-            Ok(Arc::new(IMessageChannel::new(alias, peer_resolver)))
+            Ok::<Arc<dyn Channel>, anyhow::Error>(Arc::new(IMessageChannel::new(
+                alias,
+                peer_resolver,
+            )))
         }
         #[cfg(not(feature = "channel-imessage"))]
         "imessage" => {
@@ -6182,7 +6195,7 @@ fn build_channel_by_id(
                     let alias = alias.clone();
                     Arc::new(move || cfg_arc.read().channel_external_peers("line", &alias))
                 };
-                Ok(Arc::new(
+                Ok::<Arc<dyn Channel>, anyhow::Error>(Arc::new(
                     LineChannel::from_config(ln, alias, peer_resolver)
                         .with_persistence(config_arc.clone()),
                 ))
@@ -6201,7 +6214,10 @@ fn build_channel_by_id(
                     .iter()
                     .next()
                     .context("Voice Call channel is not configured")?;
-                Ok(Arc::new(VoiceCallChannel::new(alias.clone(), vc.clone())))
+                Ok::<Arc<dyn Channel>, anyhow::Error>(Arc::new(VoiceCallChannel::new(
+                    alias.clone(),
+                    vc.clone(),
+                )))
             }
             #[cfg(not(feature = "channel-voice-call"))]
             {
@@ -6213,7 +6229,9 @@ fn build_channel_by_id(
             matrix, whatsapp, qq, lark, feishu, dingtalk, wecom, wecom_ws, nextcloud_talk, wati, linq, \
             email, gmail_push, irc, twitter, mochat, imessage, line, voice-call"
         ),
-    }
+    }?;
+
+    Ok(sanitize_arc_channel(channel))
 }
 
 /// Send a one-off message to a configured channel.
@@ -6264,6 +6282,15 @@ struct ConfiguredChannel {
     /// collide and silently overwrite each other.
     alias: Option<String>,
     channel: Arc<dyn Channel>,
+}
+
+fn sanitize_arc_channel(channel: Arc<dyn Channel>) -> Arc<dyn Channel> {
+    crate::sanitizing_channel::SanitizingChannel::wrap(channel)
+}
+
+fn sanitize_configured_channel(mut configured: ConfiguredChannel) -> ConfiguredChannel {
+    configured.channel = sanitize_arc_channel(configured.channel);
+    configured
 }
 
 /// Compose the registry key for a channel given its `name()` and configured alias.
@@ -7682,6 +7709,9 @@ fn collect_configured_channels(
     }
 
     channels
+        .into_iter()
+        .map(sanitize_configured_channel)
+        .collect()
 }
 
 /// Run health checks for configured channels.
@@ -8417,7 +8447,7 @@ pub async fn start_channels(
                 configured_channels.push(ConfiguredChannel {
                     display_name: "Nostr",
                     alias: Some(alias.clone()),
-                    channel: Arc::new(
+                    channel: sanitize_arc_channel(Arc::new(
                         NostrChannel::new(
                             &ns.private_key,
                             ns.relays.clone(),
@@ -8425,7 +8455,7 @@ pub async fn start_channels(
                             peer_resolver,
                         )
                         .await?,
-                    ),
+                    )),
                 });
             }
             #[cfg(not(feature = "channel-nostr"))]
@@ -8852,6 +8882,7 @@ pub async fn deliver_announcement(
         zeroclaw_runtime::security::LeakResult::Detected { redacted, .. } => redacted,
         zeroclaw_runtime::security::LeakResult::Clean => output.to_string(),
     };
+    let safe_output = zeroclaw_api::delivery_sanitizer::sanitize_delivery_text(&safe_output).text;
 
     let make_msg = |s: &str| SendMessage::new(s, target).in_thread(thread_id.clone());
 

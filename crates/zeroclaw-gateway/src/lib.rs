@@ -2172,6 +2172,7 @@ async fn run_gateway_chat_with_tools(
             .model_provider
             .chat_with_system(None, message, &state.model, state.temperature)
             .await?;
+        let response = zeroclaw_api::delivery_sanitizer::sanitize_delivery_text(&response).text;
         Ok(GatewayChatOutcome {
             response,
             input_tokens: None,
@@ -2247,6 +2248,7 @@ async fn run_gateway_chat_with_tools(
             ),
         )
         .await?;
+        let response = zeroclaw_api::delivery_sanitizer::sanitize_delivery_text(&response).text;
         let usage = captured_usage
             .map(|cell| *cell.lock())
             .filter(|u| u.input_tokens > 0 || u.output_tokens > 0);

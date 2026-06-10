@@ -721,7 +721,14 @@ fn persist_conversation_messages(
         if message.role == "system" {
             continue;
         }
-        let _ = backend.append(session_key, message);
+        if message.role == "assistant" {
+            let mut sanitized_message = message.clone();
+            sanitized_message.content =
+                zeroclaw_api::delivery_sanitizer::sanitize_delivery_text(&message.content).text;
+            let _ = backend.append(session_key, &sanitized_message);
+        } else {
+            let _ = backend.append(session_key, message);
+        }
     }
 }
 
@@ -851,6 +858,7 @@ async fn process_chat_message(
     // can reconstruct partial content on cancellation.
     //
     let mut accumulated_text = String::new();
+    let mut streamed_visible_text = String::new();
 
     // Aggregate token usage across all LLM calls in this turn.
     // The agent emits TurnEvent::Usage once per LLM call when the provider
@@ -1006,10 +1014,28 @@ async fn process_chat_message(
                         }
                         TurnEvent::Chunk { ref delta } => {
                             accumulated_text.push_str(delta);
-                            serde_json::json!({ "type": "chunk", "content": delta })
+                            let visible =
+                                zeroclaw_api::delivery_sanitizer::sanitize_delivery_text_partial(
+                                    &accumulated_text,
+                                )
+                                .text;
+                            if visible.is_empty() {
+                                continue;
+                            }
+                            let next_delta = if visible.starts_with(&streamed_visible_text) {
+                                visible[streamed_visible_text.len()..].to_string()
+                            } else {
+                                visible.clone()
+                            };
+                            streamed_visible_text = visible;
+                            if next_delta.is_empty() {
+                                continue;
+                            }
+                            serde_json::json!({ "type": "chunk", "content": next_delta })
                         }
                         TurnEvent::Thinking { delta } => {
-                            serde_json::json!({ "type": "thinking", "content": delta })
+                            let _ = delta;
+                            continue;
                         }
                         TurnEvent::ToolCall { id, name, args } => {
                             serde_json::json!({ "type": "tool_call", "id": id, "name": name, "args": args })
@@ -1122,7 +1148,10 @@ async fn process_chat_message(
     }
 
     match result {
-        Ok(outcome) => {
+        Ok(mut outcome) => {
+            outcome.response =
+                zeroclaw_api::delivery_sanitizer::sanitize_delivery_text(&outcome.response).text;
+
             if let Some(ref backend) = state.session_backend {
                 persist_conversation_messages(backend.as_ref(), session_key, &outcome.new_messages);
             }
