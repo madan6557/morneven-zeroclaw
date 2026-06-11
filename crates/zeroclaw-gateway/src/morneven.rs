@@ -582,6 +582,166 @@ fn morneven_cron_file(entry: &Value) -> Option<Value> {
     }))
 }
 
+fn morneven_topic_id_text(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || matches!(trimmed.to_ascii_lowercase().as_str(), "0" | "1" | "main") {
+        "main".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn morneven_topic_id(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(text)) => morneven_topic_id_text(text),
+        Some(Value::Number(number)) => morneven_topic_id_text(&number.to_string()),
+        _ => "main".to_string(),
+    }
+}
+
+fn morneven_lock_group<'a>(lock: &'a Value, chat_id: &str) -> Option<&'a Value> {
+    lock.get("groups")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|group| {
+            group
+                .get("chatId")
+                .or_else(|| group.get("chat_id"))
+                .map(|value| match value {
+                    Value::String(text) => text.trim().to_string(),
+                    Value::Number(number) => number.to_string(),
+                    _ => String::new(),
+                })
+                .as_deref()
+                == Some(chat_id)
+        })
+}
+
+fn morneven_topic_allowed(lock_group: Option<&Value>, topic_id: &str) -> Option<bool> {
+    let group = lock_group?;
+    if topic_id == "main" {
+        return group.get("allowMainTopic").and_then(Value::as_bool);
+    }
+    Some(
+        group
+            .get("allowedTopicIds")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .any(|item| morneven_topic_id(Some(item)) == topic_id)
+            })
+            .unwrap_or(false),
+    )
+}
+
+fn morneven_telegram_topics_markdown(registry: &Value) -> String {
+    let mut content = String::from(
+        "# Morneven Telegram Topics\n\n\
+         This read-only summary is generated from Bot Manager Telegram topic registry and topic lock data. Use it when the user asks about Telegram groups, topics, topic IDs, primary topics, or where scheduled/outbound messages should be sent.\n\n",
+    );
+    let lock = registry.get("topicLock").or_else(|| {
+        if registry.get("enabled").is_some() || registry.get("groups").is_some() {
+            Some(registry)
+        } else {
+            None
+        }
+    });
+    let groups = registry
+        .get("groups")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if groups.is_empty() {
+        content.push_str("No Telegram groups or topics have been registered yet.\n");
+        return content;
+    }
+    for group in groups {
+        let chat_id = string_field(&group, "chatId")
+            .or_else(|| string_field(&group, "chat_id"))
+            .unwrap_or("unknown");
+        let title = string_field(&group, "title").unwrap_or("Untitled group");
+        let is_forum = group
+            .get("isForum")
+            .or_else(|| group.get("is_forum"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let lock_group = lock.and_then(|lock| morneven_lock_group(lock, chat_id));
+        let allow_main = morneven_topic_allowed(lock_group, "main").unwrap_or(true);
+        let primary = lock_group
+            .and_then(|group| {
+                group
+                    .get("primaryTopicId")
+                    .or_else(|| group.get("primary_topic_id"))
+            })
+            .map(|value| morneven_topic_id(Some(value)))
+            .unwrap_or_else(|| "main".to_string());
+
+        content.push_str(&format!(
+            "## {title}\n\n- Chat ID: `{chat_id}`\n- Forum group: {is_forum}\n- Main topic allowed: {allow_main}\n- Primary topic ID: `{primary}`\n\n"
+        ));
+
+        let topics = group
+            .get("topics")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if topics.is_empty() {
+            content.push_str("- Topics: none registered yet.\n\n");
+            continue;
+        }
+        content.push_str("| Topic ID | Title | Allowed | Primary | Source |\n");
+        content.push_str("| --- | --- | --- | --- | --- |\n");
+        for topic in topics {
+            let topic_id = morneven_topic_id(
+                topic
+                    .get("messageThreadId")
+                    .or_else(|| topic.get("message_thread_id")),
+            );
+            let topic_title = string_field(&topic, "title").unwrap_or(if topic_id == "main" {
+                "Main topic"
+            } else {
+                "Untitled topic"
+            });
+            let source = string_field(&topic, "source").unwrap_or("unknown");
+            let allowed = morneven_topic_allowed(lock_group, &topic_id)
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let is_primary = topic_id == primary;
+            content.push_str(&format!(
+                "| `{topic_id}` | {topic_title} | {allowed} | {is_primary} | {source} |\n"
+            ));
+        }
+        content.push('\n');
+    }
+    content
+}
+
+fn morneven_telegram_topics_file(entry: &Value) -> Option<Value> {
+    let registry = topic_registry_from_entry(entry);
+    let has_groups = registry
+        .get("groups")
+        .and_then(Value::as_array)
+        .is_some_and(|groups| !groups.is_empty());
+    let has_lock = registry.get("topicLock").is_some();
+    if !has_groups && !has_lock {
+        return None;
+    }
+    let identity = entry.get("identity").cloned().unwrap_or_else(|| json!({}));
+    let identity_slug = string_field(&identity, "slug").unwrap_or("runtime");
+    let content = morneven_telegram_topics_markdown(&registry);
+    Some(json!({
+        "id": format!("morneven-telegram-topics-{identity_slug}"),
+        "path": "MORNEVEN_TELEGRAM_TOPICS.md",
+        "kind": "telegram-topics",
+        "contentType": "text/markdown",
+        "objectPath": format!("zeroclaw-managed://{identity_slug}/MORNEVEN_TELEGRAM_TOPICS.md"),
+        "size": content.len(),
+        "updatedAt": now_iso(),
+        "content": content
+    }))
+}
+
 fn nanobot_legacy_root_candidates() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     for key in ["MORNEVEN_NANOBOT_LEGACY_ROOT", "NANOBOT_LEGACY_ROOT"] {
@@ -778,6 +938,13 @@ fn runtime_files_for_materialization(
         string_field(file, "path").is_some_and(|path| path.eq_ignore_ascii_case("MORNEVEN_CRON.md"))
     });
     if !has_cron_summary && let Some(file) = morneven_cron_file(entry) {
+        bundle_files.push(file);
+    }
+    let has_topic_summary = bundle_files.iter().any(|file| {
+        string_field(file, "path")
+            .is_some_and(|path| path.eq_ignore_ascii_case("MORNEVEN_TELEGRAM_TOPICS.md"))
+    });
+    if !has_topic_summary && let Some(file) = morneven_telegram_topics_file(entry) {
         bundle_files.push(file);
     }
 
@@ -1434,9 +1601,11 @@ fn materialize_runtime_entry(
         gateway_port,
     )?;
     write_zeroclaw_toml_config(&zeroclaw_config_path, entry, &workspace_path, gateway_port)?;
+    let topic_registry = topic_registry_from_entry(entry);
+    json_write(&runtime_dir.join("telegram-topics.json"), &topic_registry)?;
     json_write(
-        &runtime_dir.join("telegram-topics.json"),
-        &topic_registry_from_entry(entry),
+        &workspace_path.join("MORNEVEN_TELEGRAM_TOPICS.json"),
+        &topic_registry,
     )?;
     write_manifest(
         &manifest_path,
@@ -3348,6 +3517,56 @@ mod tests {
             state.get("groups").and_then(Value::as_array).map(Vec::len),
             Some(1)
         );
+    }
+
+    #[test]
+    fn morneven_runtime_files_include_telegram_topic_summary() {
+        let entry = json!({
+            "identity": {
+                "slug": "sola"
+            },
+            "channels": {
+                "telegram": {
+                    "enabled": true,
+                    "topicRegistry": {
+                        "groups": [{
+                            "chatId": "-1003950002621",
+                            "title": "Morneven Playground",
+                            "isForum": true,
+                            "topics": [{
+                                "messageThreadId": "2",
+                                "title": "Bot",
+                                "source": "observed"
+                            }]
+                        }]
+                    },
+                    "topicLock": {
+                        "enabled": true,
+                        "groups": [{
+                            "chatId": "-1003950002621",
+                            "allowedTopicIds": ["2"],
+                            "allowMainTopic": false,
+                            "primaryTopicId": "2"
+                        }]
+                    }
+                }
+            },
+            "zeroclaw": {
+                "canonicalFiles": []
+            }
+        });
+        let identity = entry.get("identity").unwrap().clone();
+        let files = runtime_files_for_materialization(&entry, &identity, &json!({}));
+        let topics = files
+            .iter()
+            .find(|file| string_field(file, "path") == Some("MORNEVEN_TELEGRAM_TOPICS.md"))
+            .expect("managed Telegram topic summary should be materialized");
+        let content = string_field(topics, "content").unwrap_or_default();
+
+        assert!(content.contains("Morneven Playground"));
+        assert!(content.contains("Chat ID: `-1003950002621`"));
+        assert!(content.contains("| `2` | Bot | true | true | observed |"));
+        assert!(content.contains("Main topic allowed: false"));
     }
 
     #[test]

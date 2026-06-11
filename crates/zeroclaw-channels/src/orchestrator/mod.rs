@@ -562,6 +562,17 @@ fn slash_command_base(content: &str) -> Option<String> {
     }
 }
 
+fn slash_command_target(content: &str) -> Option<String> {
+    let trimmed = command_view_content(content);
+    if !trimmed.starts_with('/') {
+        return None;
+    }
+    let cmd = trimmed.split_whitespace().next().unwrap_or("");
+    let (_, target) = cmd.split_once('@')?;
+    let target = target.trim();
+    (!target.is_empty()).then(|| target.trim_start_matches('@').to_ascii_lowercase())
+}
+
 fn is_stop_command(content: &str) -> bool {
     slash_command_base(content).as_deref() == Some("/stop")
 }
@@ -575,6 +586,54 @@ fn is_dream_command(content: &str) -> bool {
 
 fn is_slash_command_message(content: &str) -> bool {
     slash_command_base(content).is_some()
+}
+
+fn telegram_content_replies_to_bot(content: &str, bot_names: &[String]) -> bool {
+    let first = content.lines().map(str::trim).find(|line| !line.is_empty());
+    let Some(first) = first else {
+        return false;
+    };
+    let Some(rest) = first.strip_prefix("> @") else {
+        return false;
+    };
+    let reply_name = rest
+        .split([':', ' ', '\t'])
+        .next()
+        .unwrap_or("")
+        .trim_start_matches('@')
+        .to_ascii_lowercase();
+    !reply_name.is_empty()
+        && bot_names
+            .iter()
+            .map(|name| name.trim_start_matches('@').to_ascii_lowercase())
+            .any(|name| name == reply_name)
+}
+
+fn telegram_new_session_targets_current_bot(
+    msg: &zeroclaw_api::channel::ChannelMessage,
+    target_channel: Option<&Arc<dyn Channel>>,
+) -> bool {
+    if msg.channel != "telegram" || !msg.reply_target.starts_with('-') {
+        return true;
+    }
+    let Some(command_target) = slash_command_target(&msg.content) else {
+        let bot_names = target_channel
+            .into_iter()
+            .flat_map(|channel| {
+                [channel.self_handle(), channel.self_addressed_mention()]
+                    .into_iter()
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        return telegram_content_replies_to_bot(&msg.content, &bot_names);
+    };
+    target_channel.is_some_and(|channel| {
+        [channel.self_handle(), channel.self_addressed_mention()]
+            .into_iter()
+            .flatten()
+            .map(|name| name.trim_start_matches('@').to_ascii_lowercase())
+            .any(|name| name == command_target)
+    })
 }
 
 /// Strip tool-call XML tags from outgoing messages.
@@ -755,20 +814,34 @@ fn channel_delivery_instructions(channel_name: &str) -> Option<&'static str> {
     }
 }
 
+#[cfg(test)]
 fn build_channel_system_prompt_for_message(
     base_prompt: &str,
     msg: &zeroclaw_api::channel::ChannelMessage,
     target_channel: Option<&Arc<dyn Channel>>,
 ) -> String {
+    build_channel_system_prompt_for_message_with_workspace(base_prompt, msg, target_channel, None)
+}
+
+fn build_channel_system_prompt_for_message_with_workspace(
+    base_prompt: &str,
+    msg: &zeroclaw_api::channel::ChannelMessage,
+    target_channel: Option<&Arc<dyn Channel>>,
+    workspace_dir: Option<&Path>,
+) -> String {
     let bot_mention = target_channel.and_then(|c| c.self_addressed_mention());
-    build_channel_system_prompt(
+    let mut prompt = build_channel_system_prompt(
         base_prompt,
         &msg.channel,
         &msg.reply_target,
         &msg.sender,
         &msg.id,
         bot_mention.as_deref(),
-    )
+    );
+    if let Some(telegram_context) = build_telegram_context_prompt(msg, workspace_dir) {
+        prompt.push_str(&telegram_context);
+    }
+    prompt
 }
 
 fn build_channel_system_prompt(
@@ -848,6 +921,212 @@ fn build_channel_system_prompt(
     }
 
     prompt
+}
+
+fn parse_telegram_reply_target(reply_target: &str, thread_ts: Option<&str>) -> (String, String) {
+    let (chat_id, thread_id) = reply_target
+        .split_once(':')
+        .map(|(chat, topic)| (chat.to_string(), Some(topic.to_string())))
+        .unwrap_or_else(|| (reply_target.to_string(), thread_ts.map(ToOwned::to_owned)));
+    let topic_id = thread_id
+        .as_deref()
+        .map(telegram_topic_id_text)
+        .unwrap_or_else(|| "main".to_string());
+    (chat_id, topic_id)
+}
+
+fn telegram_topic_id_text(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || matches!(trimmed.to_ascii_lowercase().as_str(), "0" | "1" | "main") {
+        "main".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn read_telegram_topic_registry(workspace_dir: Option<&Path>) -> Option<serde_json::Value> {
+    let workspace_dir = workspace_dir?;
+    let candidates = [
+        workspace_dir.join("MORNEVEN_TELEGRAM_TOPICS.json"),
+        workspace_dir
+            .parent()
+            .map(|parent| parent.join("telegram-topics.json"))
+            .unwrap_or_else(|| workspace_dir.join("telegram-topics.json")),
+    ];
+    candidates.into_iter().find_map(|path| {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+    })
+}
+
+fn topic_registry_group<'a>(
+    registry: &'a serde_json::Value,
+    chat_id: &str,
+) -> Option<&'a serde_json::Value> {
+    registry
+        .get("groups")
+        .and_then(serde_json::Value::as_array)?
+        .iter()
+        .find(|group| {
+            group
+                .get("chatId")
+                .or_else(|| group.get("chat_id"))
+                .map(|value| match value {
+                    serde_json::Value::String(text) => text.trim().to_string(),
+                    serde_json::Value::Number(number) => number.to_string(),
+                    _ => String::new(),
+                })
+                .as_deref()
+                == Some(chat_id)
+        })
+}
+
+fn topic_registry_lock_group<'a>(
+    registry: &'a serde_json::Value,
+    chat_id: &str,
+) -> Option<&'a serde_json::Value> {
+    registry
+        .get("topicLock")
+        .or_else(|| {
+            if registry.get("enabled").is_some() || registry.get("groups").is_some() {
+                Some(registry)
+            } else {
+                None
+            }
+        })?
+        .get("groups")
+        .and_then(serde_json::Value::as_array)?
+        .iter()
+        .find(|group| {
+            group
+                .get("chatId")
+                .or_else(|| group.get("chat_id"))
+                .map(|value| match value {
+                    serde_json::Value::String(text) => text.trim().to_string(),
+                    serde_json::Value::Number(number) => number.to_string(),
+                    _ => String::new(),
+                })
+                .as_deref()
+                == Some(chat_id)
+        })
+}
+
+fn topic_registry_topic<'a>(
+    group: &'a serde_json::Value,
+    topic_id: &str,
+) -> Option<&'a serde_json::Value> {
+    group
+        .get("topics")
+        .and_then(serde_json::Value::as_array)?
+        .iter()
+        .find(|topic| {
+            topic
+                .get("messageThreadId")
+                .or_else(|| topic.get("message_thread_id"))
+                .map(|value| match value {
+                    serde_json::Value::String(text) => telegram_topic_id_text(text),
+                    serde_json::Value::Number(number) => {
+                        telegram_topic_id_text(&number.to_string())
+                    }
+                    _ => "main".to_string(),
+                })
+                .as_deref()
+                == Some(topic_id)
+        })
+}
+
+fn topic_registry_allowed(lock_group: Option<&serde_json::Value>, topic_id: &str) -> Option<bool> {
+    let group = lock_group?;
+    if topic_id == "main" {
+        return group
+            .get("allowMainTopic")
+            .and_then(serde_json::Value::as_bool);
+    }
+    Some(
+        group
+            .get("allowedTopicIds")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items.iter().any(|item| match item {
+                    serde_json::Value::String(text) => telegram_topic_id_text(text) == topic_id,
+                    serde_json::Value::Number(number) => {
+                        telegram_topic_id_text(&number.to_string()) == topic_id
+                    }
+                    _ => false,
+                })
+            })
+            .unwrap_or(false),
+    )
+}
+
+fn build_telegram_context_prompt(
+    msg: &zeroclaw_api::channel::ChannelMessage,
+    workspace_dir: Option<&Path>,
+) -> Option<String> {
+    if msg.channel != "telegram" || msg.reply_target.trim().is_empty() {
+        return None;
+    }
+    let (chat_id, topic_id) =
+        parse_telegram_reply_target(&msg.reply_target, msg.thread_ts.as_deref());
+    let registry = read_telegram_topic_registry(workspace_dir);
+    let group = registry
+        .as_ref()
+        .and_then(|state| topic_registry_group(state, &chat_id));
+    let lock_group = registry
+        .as_ref()
+        .and_then(|state| topic_registry_lock_group(state, &chat_id));
+    let topic = group.and_then(|group| topic_registry_topic(group, &topic_id));
+    let chat_title = group
+        .and_then(|group| group.get("title"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let topic_title = topic
+        .and_then(|topic| topic.get("title"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(if topic_id == "main" { "Main topic" } else { "" });
+    let is_forum = group
+        .and_then(|group| group.get("isForum").or_else(|| group.get("is_forum")))
+        .and_then(serde_json::Value::as_bool);
+    let allowed = topic_registry_allowed(lock_group, &topic_id);
+    let primary_topic = lock_group
+        .and_then(|group| {
+            group
+                .get("primaryTopicId")
+                .or_else(|| group.get("primary_topic_id"))
+        })
+        .map(|value| match value {
+            serde_json::Value::String(text) => telegram_topic_id_text(text),
+            serde_json::Value::Number(number) => telegram_topic_id_text(&number.to_string()),
+            _ => "main".to_string(),
+        });
+
+    let mut context = format!(
+        "\n\nTelegram context: current chat_id={chat_id}, current topic_id={topic_id}, reply_target={}.",
+        msg.reply_target
+    );
+    if let Some(alias) = msg.channel_alias.as_deref() {
+        context.push_str(&format!(" bot_alias={alias}."));
+    }
+    if !chat_title.is_empty() {
+        context.push_str(&format!(" chat_title=\"{chat_title}\"."));
+    }
+    if !topic_title.is_empty() {
+        context.push_str(&format!(" topic_title=\"{topic_title}\"."));
+    }
+    if let Some(is_forum) = is_forum {
+        context.push_str(&format!(" is_forum={is_forum}."));
+    }
+    if let Some(allowed) = allowed {
+        context.push_str(&format!(" topic_allowed={allowed}."));
+    }
+    if let Some(primary_topic) = primary_topic {
+        context.push_str(&format!(" primary_topic_id={primary_topic}."));
+    }
+    context.push_str(
+        " Use this context when the user refers to this group, current topic, topic Bot, or asks where to send Telegram messages. Do not ask for the group or topic ID when this context provides it.",
+    );
+    Some(context)
 }
 
 fn current_date_section() -> String {
@@ -1994,6 +2273,12 @@ async fn handle_runtime_command_if_needed(
     let Some(command) = parse_runtime_command(&msg.channel, &msg.content) else {
         return false;
     };
+
+    if matches!(command, ChannelRuntimeCommand::NewSession)
+        && !telegram_new_session_targets_current_bot(msg, target_channel)
+    {
+        return true;
+    }
 
     let Some(channel) = target_channel else {
         return true;
@@ -3793,8 +4078,12 @@ async fn process_channel_message_body(
     } else {
         refreshed_new_session_system_prompt(ctx.as_ref())
     };
-    let mut system_prompt =
-        build_channel_system_prompt_for_message(&base_system_prompt, &msg, target_channel.as_ref());
+    let mut system_prompt = build_channel_system_prompt_for_message_with_workspace(
+        &base_system_prompt,
+        &msg,
+        target_channel.as_ref(),
+        Some(ctx.workspace_dir.as_path()),
+    );
     if !memory_context.is_empty() {
         let _ = write!(system_prompt, "\n\n{memory_context}");
     }
@@ -9000,6 +9289,9 @@ mod tests {
     impl Channel for MentionMockChannel {
         fn name(&self) -> &str {
             self.name
+        }
+        fn self_handle(&self) -> Option<String> {
+            Some(self.mention.trim_start_matches('@').to_string())
         }
         fn self_addressed_mention(&self) -> Option<String> {
             Some(self.mention.to_string())
@@ -14558,6 +14850,97 @@ BTC is currently around $65,000 based on latest tool output."#
     }
 
     #[test]
+    fn telegram_new_session_targeting_allows_private_chat() {
+        let msg = zeroclaw_api::channel::ChannelMessage {
+            channel: "telegram".into(),
+            reply_target: "6606508025".into(),
+            content: "/new".into(),
+            ..zeroclaw_api::channel::ChannelMessage::new(
+                "m1",
+                "u1",
+                "6606508025",
+                "/new",
+                "telegram",
+                0,
+            )
+        };
+
+        assert!(telegram_new_session_targets_current_bot(&msg, None));
+    }
+
+    #[test]
+    fn telegram_new_session_targeting_allows_current_bot_suffix() {
+        let target = mention_mock("telegram", "@S_o_l_a_bot");
+        let msg = zeroclaw_api::channel::ChannelMessage {
+            channel: "telegram".into(),
+            reply_target: "-100:6151".into(),
+            content: "/new@S_o_l_a_bot".into(),
+            thread_ts: Some("6151".into()),
+            ..zeroclaw_api::channel::ChannelMessage::new(
+                "m1",
+                "u1",
+                "-100:6151",
+                "/new@S_o_l_a_bot",
+                "telegram",
+                0,
+            )
+        };
+
+        assert!(telegram_new_session_targets_current_bot(
+            &msg,
+            Some(&target)
+        ));
+    }
+
+    #[test]
+    fn telegram_new_session_targeting_allows_reply_to_current_bot() {
+        let target = mention_mock("telegram", "@S_o_l_a_bot");
+        let msg = zeroclaw_api::channel::ChannelMessage {
+            channel: "telegram".into(),
+            reply_target: "-100:6151".into(),
+            content: "> @S_o_l_a_bot:\n> old answer\n\n/new".into(),
+            thread_ts: Some("6151".into()),
+            ..zeroclaw_api::channel::ChannelMessage::new(
+                "m1",
+                "u1",
+                "-100:6151",
+                "/new",
+                "telegram",
+                0,
+            )
+        };
+
+        assert!(telegram_new_session_targets_current_bot(
+            &msg,
+            Some(&target)
+        ));
+    }
+
+    #[test]
+    fn telegram_new_session_targeting_blocks_plain_group_command() {
+        let target = mention_mock("telegram", "@S_o_l_a_bot");
+        let msg = zeroclaw_api::channel::ChannelMessage {
+            channel: "telegram".into(),
+            reply_target: "-100:6151".into(),
+            content: "/new".into(),
+            thread_ts: Some("6151".into()),
+            ..zeroclaw_api::channel::ChannelMessage::new(
+                "m1",
+                "u1",
+                "-100:6151",
+                "/new",
+                "telegram",
+                0,
+            )
+        };
+
+        assert!(!telegram_new_session_targets_current_bot(
+            &msg,
+            Some(&target)
+        ));
+    }
+
+    #[test]
     fn dream_command_prompt_reinforces_final_only_output() {
         let prompt = dream_command_prompt("/dream kurs");
 
@@ -18377,6 +18760,64 @@ Done."#;
             "wrapper did not propagate channel/reply_target/sender/message_id \
              from ChannelMessage: {prompt}"
         );
+    }
+
+    #[test]
+    fn build_channel_system_prompt_includes_telegram_topic_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("MORNEVEN_TELEGRAM_TOPICS.json"),
+            serde_json::json!({
+                "groups": [{
+                    "chatId": "-1003950002621",
+                    "title": "Morneven Playground",
+                    "isForum": true,
+                    "topics": [{
+                        "messageThreadId": "2",
+                        "title": "Bot",
+                        "source": "observed"
+                    }]
+                }],
+                "topicLock": {
+                    "enabled": true,
+                    "groups": [{
+                        "chatId": "-1003950002621",
+                        "allowedTopicIds": ["2"],
+                        "allowMainTopic": false,
+                        "primaryTopicId": "2"
+                    }]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let msg = zeroclaw_api::channel::ChannelMessage {
+            channel: "telegram".into(),
+            channel_alias: Some("default".into()),
+            reply_target: "-1003950002621:2".into(),
+            thread_ts: Some("2".into()),
+            ..zeroclaw_api::channel::ChannelMessage::new(
+                "telegram_-1003950002621_10",
+                "6606508025",
+                "-1003950002621:2",
+                "hi",
+                "telegram",
+                0,
+            )
+        };
+
+        let prompt = build_channel_system_prompt_for_message_with_workspace(
+            "Base.",
+            &msg,
+            None,
+            Some(tmp.path()),
+        );
+
+        assert!(prompt.contains("Telegram context: current chat_id=-1003950002621"));
+        assert!(prompt.contains("current topic_id=2"));
+        assert!(prompt.contains("chat_title=\"Morneven Playground\""));
+        assert!(prompt.contains("topic_title=\"Bot\""));
+        assert!(prompt.contains("primary_topic_id=2"));
     }
 
     #[test]

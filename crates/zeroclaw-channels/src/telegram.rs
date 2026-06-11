@@ -671,6 +671,111 @@ impl TelegramChannel {
         if let Ok(content) = serde_json::to_vec_pretty(state) {
             let _ = std::fs::write(path, content);
         }
+        self.write_morneven_topic_workspace_summary(state);
+    }
+
+    fn write_morneven_topic_workspace_summary(&self, state: &serde_json::Value) {
+        let Some(workspace_dir) = &self.workspace_dir else {
+            return;
+        };
+        let _ = std::fs::create_dir_all(workspace_dir);
+        if let Ok(content) = serde_json::to_vec_pretty(state) {
+            let _ = std::fs::write(workspace_dir.join("MORNEVEN_TELEGRAM_TOPICS.json"), content);
+        }
+        let summary = Self::morneven_topic_summary_markdown(state);
+        let _ = std::fs::write(workspace_dir.join("MORNEVEN_TELEGRAM_TOPICS.md"), summary);
+    }
+
+    fn morneven_topic_summary_markdown(state: &serde_json::Value) -> String {
+        let mut content = String::from(
+            "# Morneven Telegram Topics\n\n\
+             This read-only summary is generated from observed Telegram topic updates and Bot Manager topic lock data. Use it when the user asks about Telegram groups, topics, topic IDs, primary topics, or where scheduled/outbound messages should be sent.\n\n",
+        );
+        let lock = Self::morneven_topic_lock(state);
+        let groups = state
+            .get("groups")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if groups.is_empty() {
+            content.push_str("No Telegram groups or topics have been registered yet.\n");
+            return content;
+        }
+        for group in groups {
+            let chat_id = group
+                .get("chatId")
+                .or_else(|| group.get("chat_id"))
+                .map(|value| match value {
+                    serde_json::Value::String(text) => text.trim().to_string(),
+                    serde_json::Value::Number(number) => number.to_string(),
+                    _ => "unknown".to_string(),
+                })
+                .unwrap_or_else(|| "unknown".to_string());
+            let title = group
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Untitled group");
+            let is_forum = group
+                .get("isForum")
+                .or_else(|| group.get("is_forum"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let lock_group = lock.and_then(|lock| Self::morneven_lock_group(lock, &chat_id));
+            let allow_main = lock_group
+                .map(|group| Self::morneven_group_topic_allows(group, "main"))
+                .unwrap_or(true);
+            let primary = lock_group
+                .and_then(|group| {
+                    group
+                        .get("primaryTopicId")
+                        .or_else(|| group.get("primary_topic_id"))
+                })
+                .map(|value| Self::morneven_topic_id(Some(value)))
+                .unwrap_or_else(|| "main".to_string());
+
+            content.push_str(&format!(
+                "## {title}\n\n- Chat ID: `{chat_id}`\n- Forum group: {is_forum}\n- Main topic allowed: {allow_main}\n- Primary topic ID: `{primary}`\n\n"
+            ));
+            let topics = group
+                .get("topics")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            if topics.is_empty() {
+                content.push_str("- Topics: none registered yet.\n\n");
+                continue;
+            }
+            content.push_str("| Topic ID | Title | Allowed | Primary | Source |\n");
+            content.push_str("| --- | --- | --- | --- | --- |\n");
+            for topic in topics {
+                let topic_id = Self::morneven_topic_id(
+                    topic
+                        .get("messageThreadId")
+                        .or_else(|| topic.get("message_thread_id")),
+                );
+                let title = topic
+                    .get("title")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(if topic_id == "main" {
+                        "Main topic"
+                    } else {
+                        "Untitled topic"
+                    });
+                let source = topic
+                    .get("source")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown");
+                let allowed = lock_group
+                    .map(|group| Self::morneven_group_topic_allows(group, &topic_id).to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let is_primary = topic_id == primary;
+                content.push_str(&format!(
+                    "| `{topic_id}` | {title} | {allowed} | {is_primary} | {source} |\n"
+                ));
+            }
+            content.push('\n');
+        }
+        content
     }
 
     fn morneven_topic_lock(state: &serde_json::Value) -> Option<&serde_json::Value> {
@@ -4532,6 +4637,49 @@ mod tests {
 
         assert!(!ch.morneven_inbound_topic_allowed(&locked));
         assert!(ch.morneven_inbound_topic_allowed(&allowed));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn morneven_observed_topic_updates_workspace_summary() {
+        let path = temp_topic_state_path("topic_workspace_summary");
+        let workspace = path.parent().unwrap().join("workspace");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut ch = TelegramChannel::new(
+            "fake-token".into(),
+            "default",
+            Arc::new(|| vec!["*".into()]),
+            false,
+        )
+        .with_workspace_dir(workspace.clone());
+        ch.morneven_topic_path = Some(path.clone());
+        let update = serde_json::json!({
+            "message_id": 42,
+            "message_thread_id": 6151,
+            "text": "hello",
+            "from": {
+                "id": 6606508025_i64,
+                "username": "mikylira"
+            },
+            "chat": {
+                "id": -1003602779585_i64,
+                "title": "Not Hidup Jokowi!",
+                "type": "supergroup",
+                "is_forum": true
+            }
+        });
+
+        ch.record_morneven_topic(&update);
+
+        let summary = std::fs::read_to_string(workspace.join("MORNEVEN_TELEGRAM_TOPICS.md"))
+            .expect("workspace topic summary should be written");
+        let registry = std::fs::read_to_string(workspace.join("MORNEVEN_TELEGRAM_TOPICS.json"))
+            .expect("workspace topic registry should be written");
+
+        assert!(summary.contains("Not Hidup Jokowi!"));
+        assert!(summary.contains("Chat ID: `-1003602779585`"));
+        assert!(summary.contains("| `6151` | Topic 6151 |"));
+        assert!(registry.contains("\"messageThreadId\": \"6151\""));
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
