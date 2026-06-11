@@ -2693,170 +2693,6 @@ fn strip_think_tags_inline(s: &str) -> String {
     result.trim().to_string()
 }
 
-fn looks_like_visible_reasoning_preamble(text: &str) -> bool {
-    let lower = text
-        .trim_start()
-        .chars()
-        .take(1200)
-        .collect::<String>()
-        .to_ascii_lowercase();
-    const MARKERS: &[&str] = &[
-        "the user is asking",
-        "user is asking",
-        "the user asked",
-        "the user is saying",
-        "user is saying",
-        "the user says",
-        "user says",
-        "the user wants",
-        "user wants",
-        "the question is",
-        "this likely refers",
-        "okay, i need",
-        "i need to answer",
-        "let me check",
-        "let me search",
-        "let me look",
-        "i need to check",
-        "i should check",
-        "i will check",
-        "i'll check",
-        "i'm going to",
-        "we need to",
-        "let's analyze",
-        "looking at the",
-        "actually, looking",
-        "so the user",
-        "from the memory context",
-        "the memory context",
-        "based on the memory",
-        "i found",
-    ];
-    MARKERS.iter().any(|marker| lower.starts_with(marker))
-}
-
-fn visible_answer_start(text: &str) -> Option<usize> {
-    let lower = text.to_ascii_lowercase();
-    const MARKERS: &[&str] = &[
-        "\noh, ",
-        "\njawabannya",
-        "\nintinya",
-        "\ndetailnya:",
-        "\naturannya",
-        "\nbot interaction rules:",
-        "\nmax exchange",
-        "\nbenar,",
-        "\nbenar ",
-        "\noke",
-        "\nbaik",
-        "\nini dia",
-        "\nuntuk ",
-        "\njadi ",
-        "\nfinal answer:",
-        "\nanswer:",
-        "\nsure,",
-        "\nhere is",
-        "\nhere's",
-        "\nthe answer is",
-        "\nyes,",
-        "\nno,",
-        "benar,",
-        "benar ",
-        "oke,",
-        "baik,",
-        "ini dia",
-        "sure,",
-        "here is",
-        "here's",
-        "the answer is",
-        "yes,",
-        "no,",
-    ];
-
-    MARKERS
-        .iter()
-        .filter_map(|marker| {
-            lower
-                .find(marker)
-                .map(|pos| pos + if marker.starts_with('\n') { 1 } else { 0 })
-        })
-        .min()
-}
-
-fn reasoning_paragraph_prefix(paragraph: &str) -> bool {
-    let lower = paragraph.trim_start().to_ascii_lowercase();
-    const PREFIXES: &[&str] = &[
-        "the user is asking",
-        "user is asking",
-        "the user asked",
-        "the user is saying",
-        "user is saying",
-        "the user says",
-        "user says",
-        "the user wants",
-        "user wants",
-        "the question is",
-        "this likely refers",
-        "okay, i need",
-        "let me ",
-        "i need to ",
-        "i should ",
-        "i will ",
-        "i'll ",
-        "i'm going to",
-        "we need to",
-        "let's analyze",
-        "looking at ",
-        "actually, ",
-        "so the user",
-        "from the memory context",
-        "the memory context",
-        "based on ",
-        "i found ",
-    ];
-    PREFIXES.iter().any(|prefix| lower.starts_with(prefix))
-}
-
-fn strip_visible_reasoning_preamble(message: &str) -> String {
-    let trimmed = message.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    if !looks_like_visible_reasoning_preamble(trimmed) {
-        return trimmed.to_string();
-    }
-    if let Some(start) = visible_answer_start(trimmed) {
-        return trimmed[start..].trim_start().to_string();
-    }
-
-    let mut kept = Vec::new();
-    let mut dropping = true;
-    for paragraph in trimmed.split("\n\n") {
-        let paragraph = paragraph.trim();
-        if paragraph.is_empty() {
-            continue;
-        }
-        if dropping && reasoning_paragraph_prefix(paragraph) {
-            continue;
-        }
-        dropping = false;
-        kept.push(paragraph);
-    }
-
-    kept.join("\n\n").trim().to_string()
-}
-
-fn strip_visible_reasoning_preamble_for_draft(message: &str) -> String {
-    let trimmed = message.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    if looks_like_visible_reasoning_preamble(trimmed) && visible_answer_start(trimmed).is_none() {
-        return String::new();
-    }
-    strip_visible_reasoning_preamble(trimmed)
-}
-
 fn starts_with_visible_tool_call_tag_example(response: &str) -> bool {
     let lower = response.trim_start().to_ascii_lowercase();
     let starts_with_tool_tag = lower.starts_with("<tool_call")
@@ -2930,8 +2766,8 @@ fn sanitize_channel_response(response: &str, tools: &[Box<dyn Tool>]) -> String 
         strip_isolated_tool_json_artifacts(&stripped_fenced_json, &known_tool_names);
     // Strip narration that announces tool usage before scanning for leaks.
     let stripped_narration = strip_tool_narration(&stripped_json);
-    let stripped_embedded = strip_embedded_internal_narration(&stripped_narration);
-    let sanitized = strip_visible_reasoning_preamble(&stripped_embedded);
+    let sanitized =
+        zeroclaw_api::delivery_sanitizer::sanitize_delivery_text(&stripped_narration).text;
 
     // Scan for credential leaks before returning to caller
     match zeroclaw_runtime::security::LeakDetector::new().scan(&sanitized) {
@@ -3031,103 +2867,6 @@ fn strip_tool_narration(message: &str) -> String {
     } else {
         trimmed.to_string()
     }
-}
-
-fn contains_internal_narration_marker(text: &str) -> bool {
-    const MARKERS: &[&str] = &[
-        "akses otomatis",
-        "aku coba",
-        "browser tool",
-        "cek dulu",
-        "coba aku",
-        "coba endpoint",
-        "coba lihat",
-        "directly accessing",
-        "hasil yang tadi",
-        "http_request",
-        "i need to ",
-        "i should ",
-        "i will ",
-        "i'll ",
-        "let me ",
-        "pakai tool",
-        "returned empty",
-        "returning 503",
-        "search is blocked",
-        "tool failed",
-        "try another approach",
-        "try directly",
-        "using the ",
-        "web search is blocked",
-    ];
-
-    let lower = text.to_ascii_lowercase();
-    MARKERS.iter().any(|marker| lower.contains(marker))
-}
-
-fn strip_embedded_internal_narration(message: &str) -> String {
-    let trimmed = message.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-
-    const ANSWER_MARKERS: &[&str] = &[
-        "\n\nanalisis",
-        "\n\nbenar",
-        "\n\nberikut",
-        "\n\nini ",
-        "\n\njadi ",
-        "\n\nmaaf,",
-        "\n\nmasalah akses",
-        "\n\nnilai tukar",
-        "\n\noke",
-        "\n\ntapi ",
-        "\n\nuntuk ",
-    ];
-
-    let lower = trimmed.to_ascii_lowercase();
-    let answer_start = ANSWER_MARKERS
-        .iter()
-        .filter_map(|marker| {
-            lower.find(marker).and_then(|pos| {
-                if pos == 0 || !contains_internal_narration_marker(&lower[..pos]) {
-                    None
-                } else {
-                    Some(pos + marker.chars().take_while(|ch| *ch == '\n').count())
-                }
-            })
-        })
-        .min();
-
-    if let Some(start) = answer_start {
-        return trimmed[start..].trim_start().to_string();
-    }
-
-    let paragraphs = trimmed.split("\n\n").collect::<Vec<_>>();
-    if paragraphs.len() < 2 {
-        return trimmed.to_string();
-    }
-
-    let first_clean_after_internal = paragraphs
-        .iter()
-        .position(|paragraph| contains_internal_narration_marker(paragraph))
-        .and_then(|internal_pos| {
-            paragraphs
-                .iter()
-                .enumerate()
-                .skip(internal_pos + 1)
-                .find(|(_, paragraph)| !contains_internal_narration_marker(paragraph))
-                .map(|(idx, _)| idx)
-        });
-
-    if let Some(start_idx) = first_clean_after_internal {
-        let cleaned = paragraphs[start_idx..].join("\n\n").trim().to_string();
-        if !cleaned.is_empty() {
-            return cleaned;
-        }
-    }
-
-    trimmed.to_string()
 }
 
 fn is_tool_call_payload(value: &serde_json::Value, known_tool_names: &HashSet<String>) -> bool {
@@ -4294,9 +4033,11 @@ async fn process_channel_message_body(
                         }
                         StreamDelta::Text(text) => {
                             accumulated.push_str(&text);
-                            let visible = strip_visible_reasoning_preamble_for_draft(
-                                &strip_think_tags_inline(&accumulated),
-                            );
+                            let visible =
+                                zeroclaw_api::delivery_sanitizer::sanitize_delivery_text_partial(
+                                    &strip_think_tags_inline(&accumulated),
+                                )
+                                .text;
                             if let Err(e) = channel
                                 .update_draft(&reply_target, &draft_id, &visible)
                                 .await

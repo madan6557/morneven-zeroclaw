@@ -794,7 +794,8 @@ struct OpenAiAssistantContentPart {
 struct ResponseMessage {
     content: Option<String>,
     /// Reasoning/thinking models (e.g. Qwen3, GLM-4) may return their output
-    /// in `reasoning_content` instead of `content`. Used as automatic fallback.
+    /// in `reasoning_content` instead of `content`. This is internal replay
+    /// data only and is never a visible answer fallback.
     ///
     /// OpenRouter and vLLM (>= v0.16.0) emit reasoning under `reasoning`
     /// rather than `reasoning_content`. Both keys are accepted on deserialization
@@ -837,9 +838,10 @@ impl From<RawResponseMessage> for ResponseMessage {
 }
 
 impl ResponseMessage {
-    /// Extract text content, falling back to `reasoning_content` when `content`
-    /// is missing or empty. Reasoning/thinking models (Qwen3, GLM-4, etc.)
-    /// often return their output solely in `reasoning_content`.
+    /// Extract user-visible text content only.
+    ///
+    /// `reasoning_content` is internal replay data for thinking providers and
+    /// must never be promoted to a visible assistant answer.
     /// Strips `<think>...</think>` blocks that some models (e.g. MiniMax) embed
     /// inline in `content` instead of using a separate field.
     fn effective_content(&self) -> String {
@@ -850,11 +852,7 @@ impl ResponseMessage {
             }
         }
 
-        self.reasoning_content
-            .as_ref()
-            .map(|c| strip_think_tags(c))
-            .filter(|c| !c.is_empty())
-            .unwrap_or_default()
+        String::new()
     }
 
     fn effective_content_optional(&self) -> Option<String> {
@@ -865,10 +863,7 @@ impl ResponseMessage {
             }
         }
 
-        self.reasoning_content
-            .as_ref()
-            .map(|c| strip_think_tags(c))
-            .filter(|c| !c.is_empty())
+        None
     }
 }
 
@@ -4630,35 +4625,44 @@ mod tests {
     }
 
     // ----------------------------------------------------------
-    // Reasoning model fallback tests (reasoning_content)
+    // Reasoning model visible output tests (reasoning_content)
     // ----------------------------------------------------------
 
     #[test]
-    fn reasoning_content_fallback_when_content_empty() {
-        // Reasoning models (Qwen3, GLM-4) return content: "" with reasoning_content populated
+    fn reasoning_content_not_visible_when_content_empty() {
+        // Reasoning models may return content: "" with reasoning_content populated.
         let json = r#"{"choices":[{"message":{"content":"","reasoning_content":"Thinking output here"}}]}"#;
         let resp: ApiChatResponse = serde_json::from_str(json).unwrap();
         let msg = &resp.choices[0].message;
-        assert_eq!(msg.effective_content(), "Thinking output here");
+        assert_eq!(
+            msg.reasoning_content.as_deref(),
+            Some("Thinking output here")
+        );
+        assert_eq!(msg.effective_content(), "");
+        assert_eq!(msg.effective_content_optional(), None);
     }
 
     #[test]
-    fn reasoning_content_fallback_when_content_null() {
-        // Some models may return content: null with reasoning_content
+    fn reasoning_content_not_visible_when_content_null() {
+        // Some models may return content: null with reasoning_content.
         let json =
             r#"{"choices":[{"message":{"content":null,"reasoning_content":"Fallback text"}}]}"#;
         let resp: ApiChatResponse = serde_json::from_str(json).unwrap();
         let msg = &resp.choices[0].message;
-        assert_eq!(msg.effective_content(), "Fallback text");
+        assert_eq!(msg.reasoning_content.as_deref(), Some("Fallback text"));
+        assert_eq!(msg.effective_content(), "");
+        assert_eq!(msg.effective_content_optional(), None);
     }
 
     #[test]
-    fn reasoning_content_fallback_when_content_missing() {
+    fn reasoning_content_not_visible_when_content_missing() {
         // content field absent entirely, reasoning_content present
         let json = r#"{"choices":[{"message":{"reasoning_content":"Only reasoning"}}]}"#;
         let resp: ApiChatResponse = serde_json::from_str(json).unwrap();
         let msg = &resp.choices[0].message;
-        assert_eq!(msg.effective_content(), "Only reasoning");
+        assert_eq!(msg.reasoning_content.as_deref(), Some("Only reasoning"));
+        assert_eq!(msg.effective_content(), "");
+        assert_eq!(msg.effective_content_optional(), None);
     }
 
     #[test]
@@ -4671,15 +4675,13 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_content_used_when_content_only_think_tags() {
+    fn reasoning_content_not_visible_when_content_only_think_tags() {
         let json = r#"{"choices":[{"message":{"content":"<think>secret</think>","reasoning_content":"Fallback text"}}]}"#;
         let resp: ApiChatResponse = serde_json::from_str(json).unwrap();
         let msg = &resp.choices[0].message;
-        assert_eq!(msg.effective_content(), "Fallback text");
-        assert_eq!(
-            msg.effective_content_optional().as_deref(),
-            Some("Fallback text")
-        );
+        assert_eq!(msg.effective_content(), "");
+        assert_eq!(msg.effective_content_optional(), None);
+        assert_eq!(msg.reasoning_content.as_deref(), Some("Fallback text"));
     }
 
     #[test]
@@ -4768,8 +4770,8 @@ mod tests {
             Some("chain-of-thought via vllm"),
             "the `reasoning` alias must populate the canonical reasoning_content field",
         );
-        // effective_content should also surface the reasoning when content is missing.
-        assert_eq!(msg.effective_content(), "chain-of-thought via vllm");
+        // effective_content must not surface reasoning when content is missing.
+        assert_eq!(msg.effective_content(), "");
     }
 
     #[test]

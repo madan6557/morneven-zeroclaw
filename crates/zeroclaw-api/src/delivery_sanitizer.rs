@@ -31,7 +31,8 @@ fn sanitize_delivery_text_inner(text: &str, fallback_on_empty: bool) -> Sanitize
         };
     }
 
-    let without_blocks = strip_reasoning_blocks(original);
+    let normalized = normalize_delivery_wrappers(original);
+    let without_blocks = strip_reasoning_blocks(&normalized);
     let without_fences = strip_reasoning_fences(&without_blocks);
     let without_label = strip_leading_reasoning_label(&without_fences);
     let without_preamble = strip_visible_reasoning_preamble(&without_label);
@@ -54,6 +55,18 @@ fn sanitize_delivery_text_inner(text: &str, fallback_on_empty: bool) -> Sanitize
         text: sanitized,
         blocked: false,
     }
+}
+
+fn normalize_delivery_wrappers(text: &str) -> String {
+    text.lines()
+        .filter(|line| {
+            let trimmed = line.trim().to_ascii_lowercase();
+            !matches!(trimmed.as_str(), "(continued)" | "(continues...)")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
 }
 
 fn strip_reasoning_blocks(text: &str) -> String {
@@ -182,13 +195,20 @@ fn looks_like_visible_reasoning_preamble(text: &str) -> bool {
         "this likely refers",
         "okay, i need",
         "ok, i need",
+        "actually let me",
+        "actually, let me",
         "hmm,",
         "hmm ",
         "i need to answer",
+        "i need to ",
+        "i should ",
         "let me check",
         "let me search",
         "let me look",
         "let me try",
+        "let me also",
+        "let me write",
+        "now let me",
         "i need to check",
         "i should check",
         "i will check",
@@ -204,11 +224,27 @@ fn looks_like_visible_reasoning_preamble(text: &str) -> bool {
         "the memory context",
         "based on the memory",
         "i found",
+        "jadi ini cron job",
+        "jadi ini ",
+        "ini cron job",
+        "aku harus ",
+        "aku akan ",
+        "aku akan cek",
+        "aku cek ",
+        "cek dulu",
+        "coba aku",
+        "mari aku",
+        "sepertinya",
+        "mau laporan diulang",
     ];
     MARKERS.iter().any(|marker| lower.starts_with(marker))
 }
 
 fn visible_answer_start(text: &str) -> Option<usize> {
+    if let Some(start) = line_visible_answer_start(text) {
+        return Some(start);
+    }
+
     let lower = text.to_ascii_lowercase();
     const MARKERS: &[&str] = &[
         "\n📊",
@@ -234,10 +270,19 @@ fn visible_answer_start(text: &str) -> Option<usize> {
         "\nbaik",
         "\nini dia",
         "\nuntuk ",
-        "\njadi ",
         "\nyang sudah dilakukan",
         "\nsolusi",
+        "\ntapi untungnya",
+        "\nlaporan ihsg",
+        "\nihsg",
+        "\nusd/idr",
+        "\ndata penutupan",
+        "\nsentimen pasar",
+        "\nnilai:",
+        "\nperubahan:",
+        "\nsumber:",
         "\nnilai tukar",
+        "\nkesimpulan",
         "\nfinal answer:",
         "\nanswer:",
         "\nsure,",
@@ -253,13 +298,18 @@ fn visible_answer_start(text: &str) -> Option<usize> {
         "✅",
         "⚠️",
         "jawabannya",
-        "laporan",
         "benar,",
         "benar ",
         "oke,",
         "baik,",
         "ini dia",
         "yang sudah dilakukan",
+        "tapi untungnya",
+        "laporan ihsg",
+        "data penutupan",
+        "sentimen pasar",
+        "nilai tukar",
+        "kesimpulan",
         "sure,",
         "here is",
         "here's",
@@ -279,6 +329,74 @@ fn visible_answer_start(text: &str) -> Option<usize> {
         .min()
 }
 
+fn line_visible_answer_start(text: &str) -> Option<usize> {
+    let mut offset = 0;
+    for segment in text.split_inclusive('\n') {
+        let raw = segment.strip_suffix('\n').unwrap_or(segment);
+        let trimmed = raw.trim_start();
+        let leading = raw.len().saturating_sub(trimmed.len());
+        if is_visible_answer_line(trimmed) {
+            return Some(offset + leading);
+        }
+        offset += segment.len();
+    }
+    None
+}
+
+fn is_visible_answer_line(line: &str) -> bool {
+    let normalized = line
+        .trim_start_matches(|ch: char| {
+            !(ch.is_ascii_alphanumeric() || matches!(ch, '/' | '#' | '$'))
+        })
+        .trim_start()
+        .to_ascii_lowercase();
+    if normalized.is_empty() || answer_line_is_internal(&normalized) {
+        return false;
+    }
+
+    normalized.starts_with("laporan ")
+        || normalized.starts_with("usd/idr")
+        || normalized.starts_with("ihsg")
+        || normalized.starts_with("data penutupan")
+        || normalized.starts_with("sentimen pasar")
+        || normalized.starts_with("nilai tukar")
+        || normalized.starts_with("nilai:")
+        || normalized.starts_with("perubahan:")
+        || normalized.starts_with("sumber:")
+        || normalized.starts_with("kesimpulan")
+        || normalized.starts_with("final answer:")
+        || normalized.starts_with("answer:")
+        || normalized.starts_with("here is")
+        || normalized.starts_with("here's")
+        || normalized.starts_with("the answer is")
+}
+
+fn answer_line_is_internal(lower: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "the user",
+        "let me",
+        "i need",
+        "i should",
+        "actually",
+        "hmm",
+        "browser tool",
+        "web search",
+        "search is blocked",
+        "tool",
+        "jadi ini",
+        "minta ",
+        "aku harus",
+        "aku akan",
+        "aku cek",
+        "cek dulu",
+        "coba aku",
+        "sepertinya",
+        "harus cari",
+        "akan cek",
+    ];
+    MARKERS.iter().any(|marker| lower.contains(marker))
+}
+
 fn reasoning_paragraph_prefix(paragraph: &str) -> bool {
     let lower = paragraph.trim_start().to_ascii_lowercase();
     const PREFIXES: &[&str] = &[
@@ -295,6 +413,8 @@ fn reasoning_paragraph_prefix(paragraph: &str) -> bool {
         "this likely refers",
         "okay, i need",
         "ok, i need",
+        "actually let me",
+        "actually, let me",
         "hmm,",
         "hmm ",
         "let me ",
@@ -312,6 +432,17 @@ fn reasoning_paragraph_prefix(paragraph: &str) -> bool {
         "the memory context",
         "based on ",
         "i found ",
+        "jadi ini cron job",
+        "jadi ini ",
+        "ini cron job",
+        "aku harus ",
+        "aku akan ",
+        "aku cek ",
+        "cek dulu",
+        "coba aku",
+        "mari aku",
+        "sepertinya",
+        "mau laporan diulang",
     ];
     PREFIXES.iter().any(|prefix| lower.starts_with(prefix))
 }
@@ -371,6 +502,9 @@ fn first_internal_narration_marker(text: &str) -> Option<usize> {
         "i will ",
         "i'll ",
         "let me ",
+        "actually let me",
+        "actually, let me",
+        "now let me",
         "pakai tool",
         "returned empty",
         "returning 503",
@@ -380,6 +514,11 @@ fn first_internal_narration_marker(text: &str) -> Option<usize> {
         "try directly",
         "using the ",
         "web search is blocked",
+        "jadi ini cron job",
+        "aku harus ",
+        "aku akan ",
+        "sepertinya",
+        "mau laporan diulang",
     ];
 
     let lower = text.to_ascii_lowercase();
@@ -397,6 +536,29 @@ mod tests {
         assert!(out.changed);
         assert!(!out.text.contains("The user is asking"));
         assert!(out.text.starts_with("📊 USD/IDR"));
+    }
+
+    #[test]
+    fn strips_indonesian_cron_reasoning_before_report() {
+        let input = "Jadi ini cron job yang minta nilai USD/IDR. Aku harus cari kurs terkini dari sumber terpercaya. Aku akan cek beberapa sumber.\nUSD/IDR - Pagi\nNilai: Rp 17.921,95\nSumber: BI";
+        let out = sanitize_delivery_text(input);
+        assert!(out.changed);
+        assert!(!out.text.contains("Jadi ini cron job"));
+        assert!(!out.text.contains("Aku harus"));
+        assert!(out.text.starts_with("USD/IDR - Pagi"));
+        assert!(out.text.contains("Sumber: BI"));
+    }
+
+    #[test]
+    fn strips_continued_wrapper_and_english_reasoning_before_report() {
+        let input = "(continued)\n\nActually let me look more at the big picture. Let me search for recent IHSG news. Now let me write the final report based on all the data collected.\n\nLaporan IHSG Sore\nTanggal: 11 Juni 2026\n\nData Penutupan\nNilai: 5.886,03";
+        let out = sanitize_delivery_text(input);
+        assert!(out.changed);
+        assert!(!out.text.contains("(continued)"));
+        assert!(!out.text.contains("Actually let me"));
+        assert!(!out.text.contains("Let me search"));
+        assert!(out.text.starts_with("Laporan IHSG Sore"));
+        assert!(out.text.contains("Data Penutupan"));
     }
 
     #[test]

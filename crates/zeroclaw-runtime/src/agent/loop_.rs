@@ -1864,6 +1864,7 @@ pub async fn run_tool_call_loop(
             parse_issue_detected,
             protocol_suppressed,
             response_streamed_live,
+            has_reasoning_content,
         ) = match chat_result {
             Ok(resp) => {
                 let (resp_input_tokens, resp_output_tokens) = resp
@@ -1994,6 +1995,10 @@ pub async fn run_tool_call_loop(
 
                 // Preserve native tool call IDs in assistant history so role=tool
                 // follow-up messages can reference the exact call id.
+                let has_reasoning_content = resp
+                    .reasoning_content
+                    .as_ref()
+                    .is_some_and(|content| !content.trim().is_empty());
                 let reasoning_content = resp.reasoning_content.clone();
                 let assistant_history_content = if resp.tool_calls.is_empty() {
                     if use_native_tools {
@@ -2024,6 +2029,7 @@ pub async fn run_tool_call_loop(
                     parse_issue.is_some(),
                     streamed_protocol_suppressed,
                     streamed_live_deltas,
+                    has_reasoning_content,
                 )
             }
             Err(e) => {
@@ -2112,6 +2118,12 @@ pub async fn run_tool_call_loop(
             !tool_calls.is_empty(),
             !native_tool_calls.is_empty(),
         );
+        let mut display_text =
+            zeroclaw_api::delivery_sanitizer::sanitize_delivery_text(&display_text).text;
+        if display_text.trim().is_empty() && has_reasoning_content && tool_calls.is_empty() {
+            display_text =
+                zeroclaw_api::delivery_sanitizer::BLOCKED_INTERNAL_OUTPUT_FALLBACK.to_string();
+        }
 
         // Native provider tool_calls are converted into parsed `tool_calls`
         // above; if this branch is reached there is no valid native call to run.
@@ -2226,7 +2238,7 @@ pub async fn run_tool_call_loop(
                 }
             }
 
-            history.push(ChatMessage::assistant(response_text.clone()));
+            history.push(ChatMessage::assistant(display_text.clone()));
             return Ok(accumulated_display_text);
         }
 

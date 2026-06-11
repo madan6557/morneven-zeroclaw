@@ -2678,6 +2678,17 @@ impl Agent {
                 } else {
                     text
                 };
+                let mut final_text =
+                    zeroclaw_api::delivery_sanitizer::sanitize_delivery_text(&final_text).text;
+                if final_text.trim().is_empty()
+                    && response
+                        .reasoning_content
+                        .as_ref()
+                        .is_some_and(|content| !content.trim().is_empty())
+                {
+                    final_text = zeroclaw_api::delivery_sanitizer::BLOCKED_INTERNAL_OUTPUT_FALLBACK
+                        .to_string();
+                }
 
                 let steering_messages = Self::drain_steering_messages(&mut steering_rx);
                 if !steering_messages.is_empty() {
