@@ -5595,9 +5595,9 @@ fn build_channel_by_id(
             ))
         }
         #[cfg(not(feature = "channel-telegram"))]
-        "telegram" => {
-            anyhow::bail!("Telegram channel requires the `channel-telegram` feature");
-        }
+        "telegram" => Err(anyhow::anyhow!(
+            "Telegram channel requires the `channel-telegram` feature"
+        )),
         #[cfg(feature = "channel-discord")]
         "discord" => {
             let dc = config
@@ -5633,9 +5633,9 @@ fn build_channel_by_id(
             ))
         }
         #[cfg(not(feature = "channel-discord"))]
-        "discord" => {
-            anyhow::bail!("Discord channel requires the `channel-discord` feature");
-        }
+        "discord" => Err(anyhow::anyhow!(
+            "Discord channel requires the `channel-discord` feature"
+        )),
         #[cfg(feature = "channel-slack")]
         "slack" => {
             let sl = config
@@ -5666,9 +5666,9 @@ fn build_channel_by_id(
             ))
         }
         #[cfg(not(feature = "channel-slack"))]
-        "slack" => {
-            anyhow::bail!("Slack channel requires the `channel-slack` feature");
-        }
+        "slack" => Err(anyhow::anyhow!(
+            "Slack channel requires the `channel-slack` feature"
+        )),
         #[cfg(feature = "channel-mattermost")]
         "mattermost" => {
             let mm = config
@@ -5699,9 +5699,9 @@ fn build_channel_by_id(
             ))
         }
         #[cfg(not(feature = "channel-mattermost"))]
-        "mattermost" => {
-            anyhow::bail!("Mattermost channel requires the `channel-mattermost` feature");
-        }
+        "mattermost" => Err(anyhow::anyhow!(
+            "Mattermost channel requires the `channel-mattermost` feature"
+        )),
         #[cfg(feature = "channel-signal")]
         "signal" => {
             let sg = config
@@ -5730,9 +5730,9 @@ fn build_channel_by_id(
             ))
         }
         #[cfg(not(feature = "channel-signal"))]
-        "signal" => {
-            anyhow::bail!("Signal channel requires the `channel-signal` feature");
-        }
+        "signal" => Err(anyhow::anyhow!(
+            "Signal channel requires the `channel-signal` feature"
+        )),
         "matrix" => {
             #[cfg(feature = "channel-matrix")]
             {
@@ -5762,7 +5762,9 @@ fn build_channel_by_id(
             }
             #[cfg(not(feature = "channel-matrix"))]
             {
-                anyhow::bail!("Matrix channel requires the `channel-matrix` feature");
+                Err(anyhow::anyhow!(
+                    "Matrix channel requires the `channel-matrix` feature"
+                ))
             }
         }
         "whatsapp" | "whatsapp-web" | "whatsapp_web" => {
@@ -5792,7 +5794,9 @@ fn build_channel_by_id(
             }
             #[cfg(not(feature = "whatsapp-web"))]
             {
-                anyhow::bail!("WhatsApp channel requires the `whatsapp-web` feature");
+                Err(anyhow::anyhow!(
+                    "WhatsApp channel requires the `whatsapp-web` feature"
+                ))
             }
         }
         #[cfg(feature = "channel-qq")]
@@ -5816,9 +5820,9 @@ fn build_channel_by_id(
             )))
         }
         #[cfg(not(feature = "channel-qq"))]
-        "qq" => {
-            anyhow::bail!("QQ channel requires the `channel-qq` feature");
-        }
+        "qq" => Err(anyhow::anyhow!(
+            "QQ channel requires the `channel-qq` feature"
+        )),
         "lark" => {
             #[cfg(feature = "channel-lark")]
             {
@@ -5841,7 +5845,9 @@ fn build_channel_by_id(
             }
             #[cfg(not(feature = "channel-lark"))]
             {
-                anyhow::bail!("Lark channel requires the `channel-lark` feature");
+                Err(anyhow::anyhow!(
+                    "Lark channel requires the `channel-lark` feature"
+                ))
             }
         }
         #[cfg(feature = "channel-dingtalk")]
@@ -5868,9 +5874,9 @@ fn build_channel_by_id(
             ))
         }
         #[cfg(not(feature = "channel-dingtalk"))]
-        "dingtalk" => {
-            anyhow::bail!("DingTalk channel requires the `channel-dingtalk` feature");
-        }
+        "dingtalk" => Err(anyhow::anyhow!(
+            "DingTalk channel requires the `channel-dingtalk` feature"
+        )),
         #[cfg(feature = "channel-wecom")]
         "wecom" => {
             let wc = config
@@ -5891,9 +5897,9 @@ fn build_channel_by_id(
             )))
         }
         #[cfg(not(feature = "channel-wecom"))]
-        "wecom" => {
-            anyhow::bail!("WeCom channel requires the `channel-wecom` feature");
-        }
+        "wecom" => Err(anyhow::anyhow!(
+            "WeCom channel requires the `channel-wecom` feature"
+        )),
         #[cfg(feature = "channel-wecom-ws")]
         channel_id
             if channel_id == "wecom_ws"
@@ -5944,7 +5950,9 @@ fn build_channel_by_id(
                 || channel_id.starts_with("wecom_ws.")
                 || channel_id.starts_with("wecom-ws.") =>
         {
-            anyhow::bail!("WeCom WebSocket channel requires the `channel-wecom-ws` feature");
+            Err(anyhow::anyhow!(
+                "WeCom WebSocket channel requires the `channel-wecom-ws` feature"
+            ))
         }
         #[cfg(feature = "channel-wechat")]
         "wechat" => {
@@ -5972,9 +5980,9 @@ fn build_channel_by_id(
             ))
         }
         #[cfg(not(feature = "channel-wechat"))]
-        "wechat" => {
-            anyhow::bail!("WeChat channel requires the `channel-wechat` feature");
-        }
+        "wechat" => Err(anyhow::anyhow!(
+            "WeChat channel requires the `channel-wechat` feature"
+        )),
         #[cfg(feature = "channel-nextcloud")]
         "nextcloud_talk" | "nextcloud-talk" => {
             let nc = config
@@ -6005,9 +6013,9 @@ fn build_channel_by_id(
             ))
         }
         #[cfg(not(feature = "channel-nextcloud"))]
-        "nextcloud_talk" | "nextcloud-talk" => {
-            anyhow::bail!("Nextcloud Talk channel requires the `channel-nextcloud` feature");
-        }
+        "nextcloud_talk" | "nextcloud-talk" => Err(anyhow::anyhow!(
+            "Nextcloud Talk channel requires the `channel-nextcloud` feature"
+        )),
         #[cfg(feature = "channel-wati")]
         "wati" => {
             let wati_cfg = config
@@ -6031,9 +6039,9 @@ fn build_channel_by_id(
             )))
         }
         #[cfg(not(feature = "channel-wati"))]
-        "wati" => {
-            anyhow::bail!("WATI channel requires the `channel-wati` feature");
-        }
+        "wati" => Err(anyhow::anyhow!(
+            "WATI channel requires the `channel-wati` feature"
+        )),
         #[cfg(feature = "channel-linq")]
         "linq" => {
             let lq = config
@@ -6055,9 +6063,9 @@ fn build_channel_by_id(
             )))
         }
         #[cfg(not(feature = "channel-linq"))]
-        "linq" => {
-            anyhow::bail!("Linq channel requires the `channel-linq` feature");
-        }
+        "linq" => Err(anyhow::anyhow!(
+            "Linq channel requires the `channel-linq` feature"
+        )),
         #[cfg(feature = "channel-email")]
         "email" => {
             let em = config
@@ -6078,9 +6086,9 @@ fn build_channel_by_id(
             )))
         }
         #[cfg(not(feature = "channel-email"))]
-        "email" => {
-            anyhow::bail!("Email channel requires the `channel-email` feature");
-        }
+        "email" => Err(anyhow::anyhow!(
+            "Email channel requires the `channel-email` feature"
+        )),
         #[cfg(feature = "channel-email")]
         "gmail_push" | "gmail-push" => {
             let gp = config
@@ -6101,9 +6109,9 @@ fn build_channel_by_id(
             )))
         }
         #[cfg(not(feature = "channel-email"))]
-        "gmail_push" | "gmail-push" => {
-            anyhow::bail!("Gmail Push channel requires the `channel-email` feature");
-        }
+        "gmail_push" | "gmail-push" => Err(anyhow::anyhow!(
+            "Gmail Push channel requires the `channel-email` feature"
+        )),
         #[cfg(feature = "channel-irc")]
         "irc" => {
             let irc_cfg = config
@@ -6135,9 +6143,9 @@ fn build_channel_by_id(
             )))
         }
         #[cfg(not(feature = "channel-irc"))]
-        "irc" => {
-            anyhow::bail!("IRC channel requires the `channel-irc` feature");
-        }
+        "irc" => Err(anyhow::anyhow!(
+            "IRC channel requires the `channel-irc` feature"
+        )),
         #[cfg(feature = "channel-twitter")]
         "twitter" => {
             let tw = config
@@ -6158,9 +6166,9 @@ fn build_channel_by_id(
             )))
         }
         #[cfg(not(feature = "channel-twitter"))]
-        "twitter" => {
-            anyhow::bail!("X/Twitter channel requires the `channel-twitter` feature");
-        }
+        "twitter" => Err(anyhow::anyhow!(
+            "X/Twitter channel requires the `channel-twitter` feature"
+        )),
         #[cfg(feature = "channel-mochat")]
         "mochat" => {
             let mc = config
@@ -6183,9 +6191,9 @@ fn build_channel_by_id(
             )))
         }
         #[cfg(not(feature = "channel-mochat"))]
-        "mochat" => {
-            anyhow::bail!("Mochat channel requires the `channel-mochat` feature");
-        }
+        "mochat" => Err(anyhow::anyhow!(
+            "Mochat channel requires the `channel-mochat` feature"
+        )),
         #[cfg(feature = "channel-imessage")]
         "imessage" => {
             if !config.channels.imessage.contains_key("default") {
@@ -6203,9 +6211,9 @@ fn build_channel_by_id(
             )))
         }
         #[cfg(not(feature = "channel-imessage"))]
-        "imessage" => {
-            anyhow::bail!("iMessage channel requires the `channel-imessage` feature");
-        }
+        "imessage" => Err(anyhow::anyhow!(
+            "iMessage channel requires the `channel-imessage` feature"
+        )),
         "line" => {
             #[cfg(feature = "channel-line")]
             {
@@ -6227,7 +6235,9 @@ fn build_channel_by_id(
             }
             #[cfg(not(feature = "channel-line"))]
             {
-                anyhow::bail!("LINE channel requires the `channel-line` feature");
+                Err(anyhow::anyhow!(
+                    "LINE channel requires the `channel-line` feature"
+                ))
             }
         }
         "voice-call" => {
@@ -6246,14 +6256,16 @@ fn build_channel_by_id(
             }
             #[cfg(not(feature = "channel-voice-call"))]
             {
-                anyhow::bail!("Voice Call channel requires the `channel-voice-call` feature");
+                Err(anyhow::anyhow!(
+                    "Voice Call channel requires the `channel-voice-call` feature"
+                ))
             }
         }
-        other => anyhow::bail!(
+        other => Err(anyhow::anyhow!(
             "Unknown channel '{other}'. Supported: telegram, discord, slack, mattermost, signal, \
             matrix, whatsapp, qq, lark, feishu, dingtalk, wecom, wecom_ws, nextcloud_talk, wati, linq, \
             email, gmail_push, irc, twitter, mochat, imessage, line, voice-call"
-        ),
+        )),
     }?;
 
     Ok(sanitize_arc_channel(channel))
