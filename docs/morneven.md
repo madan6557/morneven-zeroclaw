@@ -24,6 +24,25 @@ NANOBOT_MORNEVEN_RELOAD_TOKEN=<shared secret>
 Railway private networking must use `http://<private-domain>:<port>`, not
 `https://`.
 
+Current production volume mount path:
+
+```text
+/zeroclaw-data/data
+```
+
+The runtime root for Morneven identities is:
+
+```text
+/zeroclaw-data/data/morneven
+```
+
+The Docker image sets these defaults:
+
+```text
+ZEROCLAW_DATA_DIR=/zeroclaw-data/data
+MORNEVEN_ZEROCLAW_ROOT=/zeroclaw-data/data/morneven
+```
+
 For one-time Nanobot workspace inheritance, Bot Manager can also point to the
 old Nanobot service while the primary URL points to ZeroClaw:
 
@@ -44,6 +63,11 @@ The importer reads `runtimes/<slug>-<identity8>/workspace`, maps Nanobot root
 files to ZeroClaw canonical names, archives old `sessions/` under
 `legacy/nanobot/sessions/`, and lets explicit Bot Manager files override legacy
 content.
+
+Legacy data under `legacy/nanobot/**` is migration input only. Morneven backup
+and extraction jobs must not package it again as active ZeroClaw workspace data.
+Likewise, generated artifacts under `backups/**` and `bot-manager/backups/**`
+must be excluded from new backups to avoid recursive storage growth.
 
 ## Compatibility Contract
 
@@ -86,6 +110,9 @@ The first compatibility target is current Bot Manager parity:
 Bot Manager identities are materialized as separate ZeroClaw runtime directories
 under `MORNEVEN_ZEROCLAW_ROOT` or `ZEROCLAW_MORNEVEN_ROOT`. If neither is set,
 the fork uses `~/.zeroclaw/morneven`.
+
+On the current Railway image, this resolves to `/zeroclaw-data/data/morneven`.
+Do not use `/data` as the active mount path for the current deployment.
 
 The parent gateway persists desired runtime state. On Railway restart it restores
 any runtime that was marked running. Child runtimes are started with
