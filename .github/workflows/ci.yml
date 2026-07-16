@@ -1,11 +1,13 @@
 name: Quality Gate
 
 on:
+  push:
+    branches: [development-bot-manager-translation]
   pull_request:
-    branches: [master]
+    branches: [master, development-bot-manager-translation]
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:

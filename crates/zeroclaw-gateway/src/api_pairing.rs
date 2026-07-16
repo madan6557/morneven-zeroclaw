@@ -264,6 +264,7 @@ fn extract_bearer(headers: &HeaderMap) -> Option<&str> {
         .and_then(|auth| auth.strip_prefix("Bearer "))
 }
 
+#[allow(clippy::result_large_err)]
 fn require_auth(state: &AppState, headers: &HeaderMap) -> Result<(), Response> {
     if crate::morneven_auth::web_auth_enabled() {
         return super::api::require_auth(state, headers).map_err(|error| error.into_response());

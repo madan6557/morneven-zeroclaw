@@ -6,12 +6,14 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use directories::BaseDirs;
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashSet},
     env, fs, io,
+    io::{Read, Write},
     path::{Component, Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::OnceLock,
@@ -23,8 +25,14 @@ const BOT_MANAGER_TOKEN_HEADER: &str = "x-bot-manager-sync-token";
 const MAX_WORKSPACE_SYNC_BYTES: u64 = 500_000;
 const USAGE_EVENT_LIMIT: usize = 5_000;
 const DEFAULT_GATEWAY_BASE_PORT: u16 = 18_080;
+const PARENT_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
+const PARENT_LOG_ARCHIVES: usize = 3;
+const RUNTIME_LOG_MAX_BYTES: u64 = 1024 * 1024;
+const RUNTIME_LOG_ARCHIVES: usize = 2;
+const TOKEN_COMPARISON_KEY: &[u8] = b"morneven-zeroclaw-token-comparison-v1";
 
 static RUNTIME_PROCESSES: OnceLock<parking_lot::Mutex<BTreeMap<String, Child>>> = OnceLock::new();
+static MORNEVEN_LOG_LOCK: OnceLock<parking_lot::Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Deserialize)]
 pub struct ReloadRequest {
@@ -90,12 +98,6 @@ fn runtime_root() -> PathBuf {
             return PathBuf::from(trimmed);
         }
     }
-    if let Ok(path) = env::var("ZEROCLAW_MORNEVEN_ROOT") {
-        let trimmed = path.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
-        }
-    }
     BaseDirs::new()
         .map(|dirs| dirs.home_dir().join(".zeroclaw").join("morneven"))
         .unwrap_or_else(|| PathBuf::from(".zeroclaw").join("morneven"))
@@ -125,10 +127,29 @@ fn runtime_processes() -> &'static parking_lot::Mutex<BTreeMap<String, Child>> {
     RUNTIME_PROCESSES.get_or_init(|| parking_lot::Mutex::new(BTreeMap::new()))
 }
 
+fn morneven_log_lock() -> &'static parking_lot::Mutex<()> {
+    MORNEVEN_LOG_LOCK.get_or_init(|| parking_lot::Mutex::new(()))
+}
+
 fn response(status: StatusCode, payload: Value) -> Response {
     (status, Json(payload)).into_response()
 }
 
+fn secret_matches(provided: &str, expected: &str) -> bool {
+    let Ok(mut expected_mac) = Hmac::<Sha256>::new_from_slice(TOKEN_COMPARISON_KEY) else {
+        return false;
+    };
+    expected_mac.update(expected.as_bytes());
+    let expected_tag = expected_mac.finalize().into_bytes();
+
+    let Ok(mut provided_mac) = Hmac::<Sha256>::new_from_slice(TOKEN_COMPARISON_KEY) else {
+        return false;
+    };
+    provided_mac.update(provided.as_bytes());
+    provided_mac.verify_slice(&expected_tag).is_ok()
+}
+
+#[allow(clippy::result_large_err)]
 fn require_morneven_token(headers: &HeaderMap) -> Result<(), Response> {
     if crate::morneven_auth::web_auth_enabled()
         && crate::morneven_auth::require_web_session(headers).is_ok()
@@ -138,12 +159,7 @@ fn require_morneven_token(headers: &HeaderMap) -> Result<(), Response> {
 
     let expected = env::var("MORNEVEN_RELOAD_TOKEN")
         .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            env::var("NANOBOT_MORNEVEN_RELOAD_TOKEN")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-        });
+        .filter(|value| !value.trim().is_empty());
     let Some(expected) = expected else {
         return Err(response(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -154,7 +170,7 @@ fn require_morneven_token(headers: &HeaderMap) -> Result<(), Response> {
         .get(MORNEVEN_TOKEN_HEADER)
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default();
-    if provided != expected {
+    if !secret_matches(provided, &expected) {
         return Err(response(
             StatusCode::FORBIDDEN,
             json!({"ok": false, "error": "Invalid Morneven reload token"}),
@@ -164,16 +180,92 @@ fn require_morneven_token(headers: &HeaderMap) -> Result<(), Response> {
 }
 
 fn append_log(message: impl AsRef<str>) {
+    let _guard = morneven_log_lock().lock();
     let path = log_path();
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
+    let _ = rotate_log_file(&path, PARENT_LOG_MAX_BYTES, PARENT_LOG_ARCHIVES);
     let line = format!("[Morneven] {} {}\n", now_iso(), message.as_ref());
     let _ = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
         .and_then(|mut file| std::io::Write::write_all(&mut file, line.as_bytes()));
+}
+
+fn rotated_log_path(path: &Path, index: usize) -> PathBuf {
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("morneven.log");
+    path.with_file_name(format!("{name}.{index}"))
+}
+
+fn rotate_log_file(path: &Path, max_bytes: u64, archives: usize) -> io::Result<()> {
+    if archives == 0
+        || fs::metadata(path)
+            .map(|metadata| metadata.len() < max_bytes)
+            .unwrap_or(true)
+    {
+        return Ok(());
+    }
+    for index in (1..=archives).rev() {
+        let source = if index == 1 {
+            path.to_path_buf()
+        } else {
+            rotated_log_path(path, index - 1)
+        };
+        let target = rotated_log_path(path, index);
+        if target.exists() {
+            fs::remove_file(&target)?;
+        }
+        if source.exists() {
+            fs::rename(source, target)?;
+        }
+    }
+    Ok(())
+}
+
+fn append_rotating_log(
+    path: &Path,
+    content: &[u8],
+    max_bytes: u64,
+    archives: usize,
+) -> io::Result<()> {
+    rotate_log_file(path, max_bytes, archives)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?
+        .write_all(content)
+}
+
+fn forward_runtime_log<R>(mut reader: R, path: PathBuf)
+where
+    R: Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let size = match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(size) => size,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            };
+            let _guard = morneven_log_lock().lock();
+            let _ = append_rotating_log(
+                &path,
+                &buffer[..size],
+                RUNTIME_LOG_MAX_BYTES,
+                RUNTIME_LOG_ARCHIVES,
+            );
+        }
+    });
 }
 
 fn read_recent_logs(limit: usize) -> Vec<String> {
@@ -742,183 +834,7 @@ fn morneven_telegram_topics_file(entry: &Value) -> Option<Value> {
     }))
 }
 
-fn nanobot_legacy_root_candidates() -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    for key in ["MORNEVEN_NANOBOT_LEGACY_ROOT", "NANOBOT_LEGACY_ROOT"] {
-        if let Ok(path) = env::var(key) {
-            let trimmed = path.trim();
-            if !trimmed.is_empty() {
-                roots.push(PathBuf::from(trimmed));
-            }
-        }
-    }
-    if let Some(parent) = runtime_root().parent() {
-        roots.push(parent.join("legacy").join("nanobot"));
-    }
-    roots.push(PathBuf::from("/data/.nanobot"));
-
-    let mut unique = Vec::new();
-    for root in roots {
-        if !unique.iter().any(|existing| existing == &root) {
-            unique.push(root);
-        }
-    }
-    unique
-}
-
-fn legacy_nanobot_runtime_dirs(identity: &Value) -> Vec<PathBuf> {
-    let slug = runtime_slug(identity);
-    let safe_id = normalize_slug(string_field(identity, "id").unwrap_or(&slug));
-    let suffix: String = safe_id.chars().take(8).collect();
-    let runtime_dir_name = format!("{slug}-{suffix}");
-    let mut dirs = Vec::new();
-    for root in nanobot_legacy_root_candidates() {
-        if root.join("workspace").is_dir() {
-            dirs.push(root);
-            continue;
-        }
-        let runtimes_root = if root.file_name().and_then(|name| name.to_str()) == Some("runtimes") {
-            root
-        } else {
-            root.join("runtimes")
-        };
-        dirs.push(runtimes_root.join(&runtime_dir_name));
-    }
-    dirs
-}
-
-fn canonicalize_legacy_nanobot_path(relative_path: &str) -> String {
-    let normalized = relative_path
-        .trim()
-        .replace('\\', "/")
-        .trim_start_matches('/')
-        .to_string();
-    let lower = normalized.to_ascii_lowercase();
-    if lower.starts_with("sessions/") {
-        return format!("legacy/nanobot/{normalized}");
-    }
-    match lower.as_str() {
-        "agents.md" => "AGENTS.md".to_string(),
-        "soul.md" => "SOUL.md".to_string(),
-        "identity.md" => "IDENTITY.md".to_string(),
-        "user.md" => "USER.md".to_string(),
-        "tools.md" => "TOOLS.md".to_string(),
-        "heartbeat.md" => "HEARTBEAT.md".to_string(),
-        "bootstrap.md" => "BOOTSTRAP.md".to_string(),
-        "memory.md" => "MEMORY.md".to_string(),
-        "lore.md" => "LORE.md".to_string(),
-        _ => normalized,
-    }
-}
-
-fn legacy_nanobot_workspace_files(identity: &Value) -> Vec<Value> {
-    let mut files = BTreeMap::new();
-    for runtime_dir in legacy_nanobot_runtime_dirs(identity) {
-        let workspace_path = runtime_dir.join("workspace");
-        if !workspace_path.is_dir() {
-            continue;
-        }
-        let mut stack = vec![workspace_path.clone()];
-        while let Some(dir) = stack.pop() {
-            let Ok(entries) = fs::read_dir(&dir) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    stack.push(path);
-                    continue;
-                }
-                if !path.is_file() {
-                    continue;
-                }
-                let Some(relative_path) = path
-                    .strip_prefix(&workspace_path)
-                    .ok()
-                    .and_then(|path| path.to_str())
-                    .map(|path| path.replace('\\', "/"))
-                else {
-                    continue;
-                };
-                let Ok(relative_path) = normalize_runtime_path(&relative_path) else {
-                    continue;
-                };
-                let runtime_path = canonicalize_legacy_nanobot_path(&relative_path);
-                let Ok(runtime_path) = normalize_runtime_path(&runtime_path) else {
-                    continue;
-                };
-                let Ok((content, stat)) = read_workspace_text(&path) else {
-                    continue;
-                };
-                let updated_at = stat
-                    .modified()
-                    .ok()
-                    .map(DateTime::<Utc>::from)
-                    .map(|time| time.to_rfc3339())
-                    .unwrap_or_else(now_iso);
-                let content_type =
-                    if runtime_path.ends_with(".json") || runtime_path.ends_with(".jsonl") {
-                        "application/json"
-                    } else {
-                        "text/markdown"
-                    };
-                let kind = infer_workspace_kind(&runtime_path);
-                let object_path = format!("legacy-nanobot://{}", relative_path);
-                let file_id = format!("legacy-nanobot-{}", content_hash(relative_path.as_bytes()));
-                files.insert(
-                    runtime_path.to_ascii_lowercase(),
-                    json!({
-                        "id": file_id,
-                        "path": runtime_path,
-                        "kind": kind,
-                        "contentType": content_type,
-                        "objectPath": object_path,
-                        "sourcePath": relative_path,
-                        "size": content.len(),
-                        "updatedAt": updated_at,
-                        "content": content
-                    }),
-                );
-            }
-        }
-    }
-    files.into_values().collect()
-}
-
-fn is_generated_zeroclaw_file(file: &Value) -> bool {
-    string_field(file, "id").is_some_and(|id| id.starts_with("zeroclaw-managed-"))
-        || string_field(file, "objectPath")
-            .is_some_and(|path| path.starts_with("zeroclaw-managed://"))
-}
-
-fn merge_runtime_materialization_files(
-    legacy_files: Vec<Value>,
-    bundle_files: Vec<Value>,
-) -> Vec<Value> {
-    let mut files = BTreeMap::new();
-    for file in legacy_files {
-        if let Some(path) = string_field(&file, "path") {
-            files.insert(path.to_ascii_lowercase(), file);
-        }
-    }
-    for file in bundle_files {
-        let Some(path) = string_field(&file, "path") else {
-            continue;
-        };
-        let key = path.to_ascii_lowercase();
-        if files.contains_key(&key) && is_generated_zeroclaw_file(&file) {
-            continue;
-        }
-        files.insert(key, file);
-    }
-    files.into_values().collect()
-}
-
-fn runtime_files_for_materialization(
-    entry: &Value,
-    identity: &Value,
-    general_config: &Value,
-) -> Vec<Value> {
+fn runtime_files_for_materialization(entry: &Value, general_config: &Value) -> Vec<Value> {
     let mut bundle_files = morneven_translated_files(entry);
     let has_policy = bundle_files.iter().any(|file| {
         string_field(file, "path")
@@ -948,7 +864,7 @@ fn runtime_files_for_materialization(
         bundle_files.push(file);
     }
 
-    merge_runtime_materialization_files(legacy_nanobot_workspace_files(identity), bundle_files)
+    bundle_files
 }
 
 fn morneven_cron_jobs(entry: &Value) -> Vec<Value> {
@@ -1214,6 +1130,30 @@ fn runtime_dir_for_identity(identity: &Value) -> PathBuf {
     let safe_id = normalize_slug(raw_id);
     let suffix: String = safe_id.chars().take(8).collect();
     runtimes_root().join(format!("{slug}-{suffix}"))
+}
+
+fn validate_runtime_directory_location(path: &Path) -> io::Result<()> {
+    if path.parent() != Some(runtimes_root().as_path()) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Runtime directory is outside the Morneven runtime root",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_runtime_directory(path: &Path) -> io::Result<()> {
+    validate_runtime_directory_location(path)?;
+    if fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Runtime directory must not be a symbolic link",
+        ));
+    }
+    Ok(())
 }
 
 fn normalize_runtime_path(raw: &str) -> io::Result<String> {
@@ -1542,19 +1482,13 @@ fn materialize_runtime_entry(
     let manifest_path = runtime_dir.join(".morneven-runtime-manifest.json");
     let config_path = runtime_dir.join("config.json");
     let zeroclaw_config_path = runtime_dir.join("config.toml");
+    validate_runtime_directory(&runtime_dir)?;
     fs::create_dir_all(&workspace_path)?;
     let previous_manifest = load_manifest(&manifest_path);
     let mut written = BTreeMap::new();
     let mut written_paths = HashSet::new();
 
-    let files = runtime_files_for_materialization(entry, &identity, general_config);
-    let legacy_nanobot_file_count = files
-        .iter()
-        .filter(|file| {
-            string_field(file, "objectPath")
-                .is_some_and(|path| path.starts_with("legacy-nanobot://"))
-        })
-        .count();
+    let files = runtime_files_for_materialization(entry, general_config);
     for file in files {
         let path = string_field(&file, "path").unwrap_or_default();
         if path.is_empty() {
@@ -1635,13 +1569,11 @@ fn materialize_runtime_entry(
             .join("state")
             .join("costs.jsonl")
             .to_string_lossy(),
-        "legacyUsageEventsPath": runtime_dir.join("provider-usage.jsonl").to_string_lossy(),
         "gatewayPort": gateway_port,
         "telegramBotUsername": null,
         "telegramTokenFingerprint": telegram_token_fingerprint(entry),
         "telegramActiveBotUsernames": [],
         "autoDreamEnabled": auto_dream_enabled(entry),
-        "legacyNanobotFileCount": legacy_nanobot_file_count,
         "fileCount": files.len(),
         "files": files,
         "provider": credential_provider(entry),
@@ -1668,6 +1600,17 @@ fn materialize_morneven_runtime(bundle: &Value) -> io::Result<Value> {
     fs::create_dir_all(runtime_root())?;
     fs::create_dir_all(runtimes_root())?;
     let entries = runtime_entries_from_bundle(bundle)?;
+    let previous_state = load_runtime_state();
+    let expected_identity_ids: HashSet<String> = entries
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .get("identity")
+                .and_then(|identity| string_field(identity, "id"))
+                .map(ToOwned::to_owned)
+        })
+        .collect();
+    stop_removed_runtime_processes(&previous_state, &expected_identity_ids)?;
     let main_identity = bundle
         .get("mainIdentity")
         .or_else(|| bundle.get("activeIdentity"))
@@ -1703,6 +1646,7 @@ fn materialize_morneven_runtime(bundle: &Value) -> io::Result<Value> {
             gateway_port,
         )?);
     }
+    cleanup_unowned_runtime_directories(&runtimes)?;
     let main_runtime = runtimes
         .iter()
         .find(|runtime| bool_field(runtime, "isMain"))
@@ -1751,6 +1695,16 @@ fn ensure_desired_runtimes(state: &Value) -> io::Result<()> {
     if desired.global.is_empty() {
         desired.global = "stopped".to_string();
     }
+    let expected_identity_ids: HashSet<String> = state
+        .get("runtimes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|runtime| string_field(runtime, "identityId").map(ToOwned::to_owned))
+        .collect();
+    desired
+        .runtimes
+        .retain(|identity_id, _| expected_identity_ids.contains(identity_id));
     for runtime in state
         .get("runtimes")
         .and_then(Value::as_array)
@@ -1774,6 +1728,60 @@ fn ensure_desired_runtimes(state: &Value) -> io::Result<()> {
     }
     desired.updated_at = Some(now_iso());
     save_desired_state(&desired)
+}
+
+fn stop_removed_runtime_processes(
+    previous_state: &Value,
+    expected_identity_ids: &HashSet<String>,
+) -> io::Result<()> {
+    for runtime in previous_state
+        .get("runtimes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(identity_id) = string_field(runtime, "identityId") else {
+            continue;
+        };
+        if !expected_identity_ids.contains(identity_id) {
+            stop_gateway_process(runtime)?;
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_unowned_runtime_directories(runtimes: &[Value]) -> io::Result<()> {
+    let expected_paths: HashSet<PathBuf> = runtimes
+        .iter()
+        .filter_map(|runtime| string_field(runtime, "runtimePath").map(PathBuf::from))
+        .collect();
+    for entry in fs::read_dir(runtimes_root())? {
+        let entry = entry?;
+        let path = entry.path();
+        if expected_paths.contains(&path) {
+            continue;
+        }
+        validate_runtime_directory_location(&path)?;
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() {
+            fs::remove_file(&path)?;
+            continue;
+        }
+        if !metadata.is_dir() {
+            continue;
+        }
+        let pid_path = path.join("gateway.pid");
+        if let Some(pid) = read_pid_file(&pid_path) {
+            stop_external_pid(pid, &path)?;
+            remove_pid_file(&pid_path);
+        }
+        fs::remove_dir_all(&path)?;
+        append_log(format!(
+            "removed unowned runtime directory {}",
+            path.to_string_lossy()
+        ));
+    }
+    Ok(())
 }
 
 fn normalize_service_url(raw: &str, default_port: Option<&str>) -> Option<String> {
@@ -1805,32 +1813,16 @@ fn normalize_service_url(raw: &str, default_port: Option<&str>) -> Option<String
     Some(url)
 }
 
-fn backend_base_urls() -> Vec<String> {
-    let mut urls = Vec::new();
-    for (key, default_port) in [
-        ("MORNEVEN_BACKEND_INTERNAL_URL", Some("8080")),
-        ("MORNEVEN_BACKEND_PUBLIC_URL", None),
-    ] {
-        if let Ok(value) = env::var(key) {
-            if let Some(url) = normalize_service_url(&value, default_port) {
-                if !urls.contains(&url) {
-                    urls.push(url);
-                }
-            }
-        }
-    }
-    urls
+fn backend_base_url() -> Option<String> {
+    env::var("MORNEVEN_BACKEND_INTERNAL_URL")
+        .ok()
+        .and_then(|value| normalize_service_url(&value, Some("8080")))
 }
 
 fn bot_manager_sync_token() -> Option<String> {
     env::var("MORNEVEN_BOT_MANAGER_SYNC_TOKEN")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            env::var("BOT_MANAGER_SYNC_TOKEN")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-        })
 }
 
 fn bot_manager_bundle_url(base: &str) -> String {
@@ -1846,45 +1838,38 @@ fn bot_manager_bundle_url(base: &str) -> String {
 async fn fetch_morneven_runtime_bundle() -> Result<Value, String> {
     let token = bot_manager_sync_token()
         .ok_or_else(|| "MORNEVEN_BOT_MANAGER_SYNC_TOKEN is not configured".to_string())?;
-    let bases = backend_base_urls();
-    if bases.is_empty() {
-        return Err("Morneven backend URL is not configured".to_string());
-    }
+    let base = backend_base_url()
+        .ok_or_else(|| "MORNEVEN_BACKEND_INTERNAL_URL is not configured".to_string())?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|error| error.to_string())?;
-    let mut last_error = String::new();
-    for base in bases {
-        let endpoint = bot_manager_bundle_url(&base);
-        let result = client
-            .get(&endpoint)
-            .header("accept", "application/json")
-            .header(BOT_MANAGER_TOKEN_HEADER, &token)
-            .send()
-            .await;
-        match result {
-            Ok(response) if response.status().is_success() => {
-                let payload = response
-                    .json::<Value>()
-                    .await
-                    .map_err(|error| error.to_string())?;
-                if payload.get("success").and_then(Value::as_bool) == Some(true) {
-                    return Ok(payload.get("data").cloned().unwrap_or(Value::Null));
-                }
-                return Ok(payload);
-            }
-            Ok(response) => {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
-                last_error = format!("{endpoint} responded with {status}: {text}");
-            }
-            Err(error) => {
-                last_error = format!("{endpoint} failed: {error}");
+    let endpoint = bot_manager_bundle_url(&base);
+    match client
+        .get(&endpoint)
+        .header("accept", "application/json")
+        .header(BOT_MANAGER_TOKEN_HEADER, &token)
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => {
+            let payload = response
+                .json::<Value>()
+                .await
+                .map_err(|error| error.to_string())?;
+            if payload.get("success").and_then(Value::as_bool) == Some(true) {
+                Ok(payload.get("data").cloned().unwrap_or(Value::Null))
+            } else {
+                Ok(payload)
             }
         }
+        Ok(response) => {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            Err(format!("{endpoint} responded with {status}: {text}"))
+        }
+        Err(error) => Err(format!("{endpoint} failed: {error}")),
     }
-    Err(last_error)
 }
 
 fn set_runtime_action(identity_id: Option<&str>, action: &str) -> io::Result<DesiredGatewayState> {
@@ -2071,19 +2056,8 @@ fn spawn_gateway_process(runtime: &Value) -> io::Result<u32> {
     let (running, pid, _) = runtime_process_snapshot(identity_id);
     if running {
         let _ = mark_runtime_started(identity_id, false);
-        return pid.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                "Runtime process is running without a PID",
-            )
-        });
+        return pid.ok_or_else(|| io::Error::other("Runtime process is running without a PID"));
     }
-    let pid_path = pid_path_for_runtime(runtime);
-    if let Some(pid) = read_pid_file(&pid_path) {
-        let _ = stop_external_pid(pid);
-        remove_pid_file(&pid_path);
-    }
-
     let runtime_dir = PathBuf::from(string_field(runtime, "runtimePath").unwrap_or_default());
     if runtime_dir.as_os_str().is_empty() {
         return Err(io::Error::new(
@@ -2091,6 +2065,12 @@ fn spawn_gateway_process(runtime: &Value) -> io::Result<u32> {
             "Runtime path is missing",
         ));
     }
+    let pid_path = pid_path_for_runtime(runtime);
+    if let Some(pid) = read_pid_file(&pid_path) {
+        stop_external_pid(pid, &runtime_dir)?;
+        remove_pid_file(&pid_path);
+    }
+
     fs::create_dir_all(&runtime_dir)?;
     let port = runtime
         .get("gatewayPort")
@@ -2104,11 +2084,7 @@ fn spawn_gateway_process(runtime: &Value) -> io::Result<u32> {
         })?;
     let executable = env::current_exe()?;
     let runtime_log = runtime_log_path(runtime);
-    let log_file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&runtime_log)?;
-    let stderr_file = log_file.try_clone()?;
+    rotate_log_file(&runtime_log, RUNTIME_LOG_MAX_BYTES, RUNTIME_LOG_ARCHIVES)?;
     let mut child = Command::new(executable)
         .arg("--config-dir")
         .arg(&runtime_dir)
@@ -2120,20 +2096,23 @@ fn spawn_gateway_process(runtime: &Value) -> io::Result<u32> {
         .env("ZEROCLAW_CONFIG_DIR", runtime_dir.as_os_str())
         .env("ZEROCLAW_DATA_DIR", runtime_dir.join("data").as_os_str())
         .env("MORNEVEN_CHILD_RUNTIME", "1")
-        .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(stderr_file))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()?;
     let pid = child.id();
+    if let Some(stdout) = child.stdout.take() {
+        forward_runtime_log(stdout, runtime_log.clone());
+    }
+    if let Some(stderr) = child.stderr.take() {
+        forward_runtime_log(stderr, runtime_log.clone());
+    }
     std::thread::sleep(Duration::from_millis(500));
     if let Some(status) = child.try_wait()? {
         let last_log = read_recent_file_lines(&runtime_log, 5).join("\n");
         remove_pid_file(&pid_path);
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!(
-                "Runtime process exited during startup with status {status}. Last log: {last_log}"
-            ),
-        ));
+        return Err(io::Error::other(format!(
+            "Runtime process exited during startup with status {status}. Last log: {last_log}"
+        )));
     }
     if let Err(error) = write_pid_file(&pid_path, pid) {
         let _ = child.kill();
@@ -2148,36 +2127,99 @@ fn spawn_gateway_process(runtime: &Value) -> io::Result<u32> {
     Ok(pid)
 }
 
-fn stop_external_pid(pid: u32) -> io::Result<()> {
+fn external_pid_is_running(pid: u32) -> io::Result<bool> {
     #[cfg(windows)]
     {
-        let status = Command::new("taskkill")
-            .arg("/PID")
-            .arg(pid.to_string())
-            .arg("/T")
-            .arg("/F")
-            .status()?;
-        if !status.success() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("taskkill failed for PID {pid}"),
-            ));
+        let output = Command::new("tasklist")
+            .arg("/FI")
+            .arg(format!("PID eq {pid}"))
+            .arg("/FO")
+            .arg("CSV")
+            .arg("/NH")
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!("tasklist failed for PID {pid}")));
         }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(stdout.contains(&format!(",\"{pid}\",")))
     }
     #[cfg(not(windows))]
     {
-        let status = Command::new("kill")
-            .arg("-TERM")
+        Ok(Command::new("kill")
+            .arg("-0")
             .arg(pid.to_string())
-            .status()?;
-        if !status.success() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("kill failed for PID {pid}"),
-            ));
-        }
+            .status()?
+            .success())
     }
-    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn external_pid_matches_runtime(pid: u32, runtime_dir: &Path) -> io::Result<bool> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let cmdline = match fs::read(format!("/proc/{pid}/cmdline")) {
+        Ok(value) => value,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let args = cmdline
+        .split(|byte| *byte == 0)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    let runtime_path = runtime_dir.as_os_str().as_bytes();
+    let has_runtime_config = args
+        .windows(2)
+        .any(|pair| pair[0] == b"--config-dir" && pair[1] == runtime_path);
+    let has_daemon_command = args.iter().any(|value| *value == b"daemon");
+    Ok(has_runtime_config && has_daemon_command)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn external_pid_matches_runtime(_pid: u32, _runtime_dir: &Path) -> io::Result<bool> {
+    Ok(true)
+}
+
+fn stop_external_pid(pid: u32, runtime_dir: &Path) -> io::Result<()> {
+    if !external_pid_is_running(pid)? {
+        return Ok(());
+    }
+    if !external_pid_matches_runtime(pid, runtime_dir)? {
+        if !external_pid_is_running(pid)? {
+            return Ok(());
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "Refusing to stop PID {pid}: process does not belong to runtime {}",
+                runtime_dir.to_string_lossy()
+            ),
+        ));
+    }
+    #[cfg(windows)]
+    let status = Command::new("taskkill")
+        .arg("/PID")
+        .arg(pid.to_string())
+        .arg("/T")
+        .arg("/F")
+        .status()?;
+    #[cfg(not(windows))]
+    let status = Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .status()?;
+
+    if !status.success() && external_pid_is_running(pid)? {
+        return Err(io::Error::other(format!("Failed to stop PID {pid}")));
+    }
+    for _ in 0..50 {
+        if !external_pid_is_running(pid)? {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(io::Error::other(format!(
+        "Process PID {pid} did not stop within 5 seconds"
+    )))
 }
 
 fn stop_gateway_process(runtime: &Value) -> io::Result<()> {
@@ -2189,10 +2231,19 @@ fn stop_gateway_process(runtime: &Value) -> io::Result<()> {
     let pid_path = pid_path_for_runtime(runtime);
     let child = runtime_processes().lock().remove(identity_id);
     if let Some(mut child) = child {
-        let _ = child.kill();
-        let _ = child.wait();
+        if child.try_wait()?.is_none() {
+            child.kill()?;
+            child.wait()?;
+        }
     } else if let Some(pid) = read_pid_file(&pid_path) {
-        let _ = stop_external_pid(pid);
+        let runtime_dir = PathBuf::from(string_field(runtime, "runtimePath").unwrap_or_default());
+        if runtime_dir.as_os_str().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Runtime path is missing",
+            ));
+        }
+        stop_external_pid(pid, &runtime_dir)?;
     }
     remove_pid_file(&pid_path);
     let _ = mark_runtime_stopped(identity_id);
@@ -2245,10 +2296,7 @@ fn apply_gateway_process_action(action: &str) -> io::Result<Vec<Value>> {
         }
     }
     if results.iter().any(|item| !bool_field(item, "ok")) {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            json!(results).to_string(),
-        ));
+        return Err(io::Error::other(json!(results).to_string()));
     }
     Ok(results)
 }
@@ -2570,12 +2618,12 @@ fn usage_event_in_range(
 ) -> bool {
     if let Some(recorded) = parse_iso_datetime(string_field(event, "recordedAt")) {
         if let Some(start) = start {
-            if recorded < start.clone() {
+            if recorded < *start {
                 return false;
             }
         }
         if let Some(end) = end {
-            if recorded >= end.clone() {
+            if recorded >= *end {
                 return false;
             }
         }
@@ -2783,10 +2831,8 @@ fn load_usage_events(
 fn runtime_usage_paths(runtime: &Value) -> Vec<PathBuf> {
     let mut seen = HashSet::new();
     let mut paths = Vec::new();
-    for key in ["usageEventsPath", "legacyUsageEventsPath"] {
-        if let Some(path) = string_field(runtime, key) {
-            push_usage_path(&mut paths, &mut seen, PathBuf::from(path));
-        }
+    if let Some(path) = string_field(runtime, "usageEventsPath") {
+        push_usage_path(&mut paths, &mut seen, PathBuf::from(path));
     }
     if let Some(runtime_path) =
         string_field(runtime, "runtimePath").filter(|value| !value.is_empty())
@@ -3117,6 +3163,50 @@ mod tests {
     }
 
     #[test]
+    fn secret_comparison_accepts_only_the_exact_value() {
+        assert!(secret_matches("reload-token", "reload-token"));
+        assert!(!secret_matches("reload-token-x", "reload-token"));
+        assert!(!secret_matches("", "reload-token"));
+    }
+
+    #[test]
+    fn log_rotation_keeps_only_configured_archives() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gateway.log");
+        fs::write(&path, b"first").unwrap();
+
+        rotate_log_file(&path, 4, 2).unwrap();
+        assert!(!path.exists());
+        assert_eq!(fs::read(rotated_log_path(&path, 1)).unwrap(), b"first");
+
+        fs::write(&path, b"second").unwrap();
+        rotate_log_file(&path, 4, 2).unwrap();
+        assert_eq!(fs::read(rotated_log_path(&path, 1)).unwrap(), b"second");
+        assert_eq!(fs::read(rotated_log_path(&path, 2)).unwrap(), b"first");
+
+        fs::write(&path, b"third").unwrap();
+        rotate_log_file(&path, 4, 2).unwrap();
+        assert_eq!(fs::read(rotated_log_path(&path, 1)).unwrap(), b"third");
+        assert_eq!(fs::read(rotated_log_path(&path, 2)).unwrap(), b"second");
+        assert!(!rotated_log_path(&path, 3).exists());
+    }
+
+    #[test]
+    fn rotating_log_writer_limits_a_live_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gateway.log");
+
+        append_rotating_log(&path, b"first", 4, 2).unwrap();
+        append_rotating_log(&path, b"second", 4, 2).unwrap();
+        append_rotating_log(&path, b"third", 4, 2).unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"third");
+        assert_eq!(fs::read(rotated_log_path(&path, 1)).unwrap(), b"second");
+        assert_eq!(fs::read(rotated_log_path(&path, 2)).unwrap(), b"first");
+        assert!(!rotated_log_path(&path, 3).exists());
+    }
+
+    #[test]
     fn morneven_provider_translates_to_zeroclaw_toml() {
         let entry = json!({
             "credentials": {
@@ -3349,54 +3439,6 @@ mod tests {
     }
 
     #[test]
-    fn morneven_materializer_keeps_legacy_nanobot_over_generated_defaults() {
-        let legacy = vec![json!({
-            "path": "AGENTS.md",
-            "content": "legacy nanobot agents",
-            "objectPath": "legacy-nanobot://AGENTS.md"
-        })];
-        let generated = vec![json!({
-            "id": "zeroclaw-managed-agents.md",
-            "path": "AGENTS.md",
-            "content": "generated default agents",
-            "objectPath": "zeroclaw-managed://sora/AGENTS.md"
-        })];
-
-        let files = merge_runtime_materialization_files(legacy, generated);
-
-        assert_eq!(files.len(), 1);
-        assert_eq!(string_field(&files[0], "path"), Some("AGENTS.md"));
-        assert_eq!(
-            string_field(&files[0], "content"),
-            Some("legacy nanobot agents")
-        );
-    }
-
-    #[test]
-    fn morneven_materializer_prefers_explicit_bundle_over_legacy_nanobot() {
-        let legacy = vec![json!({
-            "path": "AGENTS.md",
-            "content": "legacy nanobot agents",
-            "objectPath": "legacy-nanobot://AGENTS.md"
-        })];
-        let explicit = vec![json!({
-            "id": "bot-manager-file",
-            "path": "AGENTS.md",
-            "content": "bot manager agents",
-            "objectPath": "bot-manager/workspace/sora/AGENTS.md"
-        })];
-
-        let files = merge_runtime_materialization_files(legacy, explicit);
-
-        assert_eq!(files.len(), 1);
-        assert_eq!(string_field(&files[0], "path"), Some("AGENTS.md"));
-        assert_eq!(
-            string_field(&files[0], "content"),
-            Some("bot manager agents")
-        );
-    }
-
-    #[test]
     fn morneven_runtime_files_include_managed_policy() {
         let entry = json!({
             "identity": {
@@ -3412,8 +3454,7 @@ mod tests {
                 "canonicalFiles": []
             }
         });
-        let identity = entry.get("identity").unwrap().clone();
-        let files = runtime_files_for_materialization(&entry, &identity, &json!({}));
+        let files = runtime_files_for_materialization(&entry, &json!({}));
         let policy = files
             .iter()
             .find(|file| string_field(file, "path") == Some("MORNEVEN_POLICY.md"))
@@ -3466,8 +3507,7 @@ mod tests {
                 "canonicalFiles": []
             }
         });
-        let identity = entry.get("identity").unwrap().clone();
-        let files = runtime_files_for_materialization(&entry, &identity, &json!({}));
+        let files = runtime_files_for_materialization(&entry, &json!({}));
         let cron = files
             .iter()
             .find(|file| string_field(file, "path") == Some("MORNEVEN_CRON.md"))
@@ -3555,8 +3595,7 @@ mod tests {
                 "canonicalFiles": []
             }
         });
-        let identity = entry.get("identity").unwrap().clone();
-        let files = runtime_files_for_materialization(&entry, &identity, &json!({}));
+        let files = runtime_files_for_materialization(&entry, &json!({}));
         let topics = files
             .iter()
             .find(|file| string_field(file, "path") == Some("MORNEVEN_TELEGRAM_TOPICS.md"))
@@ -3570,25 +3609,24 @@ mod tests {
     }
 
     #[test]
-    fn morneven_runtime_usage_paths_include_current_and_legacy_cost_files() {
+    fn morneven_runtime_usage_paths_include_all_zeroclaw_cost_files() {
         let runtime_dir = PathBuf::from("runtime-dir");
         let workspace_dir = runtime_dir.join("workspace");
         let current_costs = runtime_dir.join("data").join("state").join("costs.jsonl");
         let runtime_state_costs = runtime_dir.join("state").join("costs.jsonl");
-        let legacy_usage = runtime_dir.join("provider-usage.jsonl");
+        let root_usage = runtime_dir.join("provider-usage.jsonl");
         let workspace_costs = workspace_dir.join("state").join("costs.jsonl");
         let runtime = json!({
             "runtimePath": runtime_dir.to_string_lossy().to_string(),
             "workspacePath": workspace_dir.to_string_lossy().to_string(),
-            "usageEventsPath": current_costs.to_string_lossy().to_string(),
-            "legacyUsageEventsPath": legacy_usage.to_string_lossy().to_string()
+            "usageEventsPath": current_costs.to_string_lossy().to_string()
         });
 
         let paths = runtime_usage_paths(&runtime);
 
         assert!(paths.contains(&current_costs));
         assert!(paths.contains(&runtime_state_costs));
-        assert!(paths.contains(&legacy_usage));
+        assert!(paths.contains(&root_usage));
         assert!(paths.contains(&workspace_costs));
         assert_eq!(paths.len(), 4);
     }

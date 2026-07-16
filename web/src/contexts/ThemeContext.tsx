@@ -58,33 +58,6 @@ export const ThemeContext = createContext<ThemeContextValue>({
   setMonoFontSize: () => {},
 });
 
-// ── Font loader (was fontLoader.ts) ──────────────────────────────────────────
-
-const loadedFonts: Set<string> = new Set();
-
-function loadGoogleFont(family: string, weights: string = '400;500;600') {
-  const id = `gfont-${family.replace(/\s+/g, '-').toLowerCase()}`;
-  if (loadedFonts.has(id)) return;
-  loadedFonts.add(id);
-  const link = document.createElement('link');
-  link.id = id;
-  link.rel = 'stylesheet';
-  link.href = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(family)}:wght@${weights}&display=swap`;
-  document.head.appendChild(link);
-}
-
-function loadUiFont(font: string) {
-  if (font === 'inter') loadGoogleFont('Inter');
-  if (font === 'segoe') loadGoogleFont('Segoe UI');
-  if (font === 'sf') loadGoogleFont('SF Pro Text');
-}
-
-function loadMonoFont(font: string) {
-  if (font === 'jetbrains') loadGoogleFont('JetBrains Mono');
-  if (font === 'fira') loadGoogleFont('Fira Code');
-  if (font === 'cascadia') loadGoogleFont('Cascadia Code');
-}
-
 // ── Locale storage (was localeStorage.ts) ────────────────────────────────────
 
 export const LOCALE_STORAGE_KEY = 'zeroclaw-locale';
@@ -289,7 +262,6 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   const setUiFont = useCallback((f: UiFont) => {
     setUiFontState(f);
-    loadUiFont(f);
     const next: StoredTheme = { theme, accent, colorTheme, uiFont: f, monoFont, uiFontSize, monoFontSize };
     applyAll(next);
     persist(next);
@@ -297,7 +269,6 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   const setMonoFont = useCallback((f: MonoFont) => {
     setMonoFontState(f);
-    loadMonoFont(f);
     const next: StoredTheme = { theme, accent, colorTheme, uiFont, monoFont: f, uiFontSize, monoFontSize };
     applyAll(next);
     persist(next);
@@ -321,8 +292,6 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     applyAll({ theme, accent, colorTheme, uiFont, monoFont, uiFontSize, monoFontSize });
-    loadUiFont(uiFont);
-    loadMonoFont(monoFont);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {

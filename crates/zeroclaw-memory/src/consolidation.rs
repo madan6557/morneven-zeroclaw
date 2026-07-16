@@ -6,7 +6,7 @@
 //!   long-term (or `null` if nothing new was learned).
 //!
 //! This two-phase approach replaces the naive raw-message auto-save with
-//! semantic extraction, similar to Nanobot's `save_memory` tool call pattern.
+//! semantic extraction from recent conversations into durable memory records.
 
 use crate::conflict;
 use crate::importance;

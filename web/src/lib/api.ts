@@ -242,7 +242,6 @@ export interface MornevenMaterializedRuntime {
   zeroclawConfigPath?: string;
   gatewayPort?: number;
   autoDreamEnabled?: boolean;
-  legacyNanobotFileCount?: number;
   fileCount?: number;
   files?: string[];
   provider?: unknown;

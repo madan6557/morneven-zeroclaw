@@ -1,8 +1,3 @@
-/* @import must precede all style rules per the CSS spec, so the font import
-   leads the file — placed lower it is silently dropped and the docs fall back
-   to system fonts. */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
-
 /* ============================================================================
    ZeroClaw docs reskin — Tier A (CSS-only)
    Ports the web dashboard's --pc-* design system onto mdBook's `ayu` theme.

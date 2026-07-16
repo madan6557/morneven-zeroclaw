@@ -501,6 +501,8 @@ pub async fn run_gateway(
     tui_registry: Option<Arc<zeroclaw_runtime::rpc::tui_identity::TuiRegistry>>,
     canvas_store: Option<CanvasStore>,
 ) -> Result<()> {
+    morneven_auth::validate_production_configuration().map_err(anyhow::Error::msg)?;
+
     // ── Security: warn on public bind without tunnel or explicit opt-in ──
     if is_public_bind(host)
         && config.tunnel.tunnel_provider == "none"

@@ -313,7 +313,6 @@ export default function MornevenBotManager() {
   const stopped = status?.gateway?.stopped ?? 0;
   const runtimeCount = status?.gateway?.runtimeCount ?? status?.morneven?.runtimeCount ?? 0;
   const fileCount = status?.morneven?.fileCount ?? runtimes.reduce((total, runtime) => total + (runtime.materialized?.fileCount ?? 0), 0);
-  const legacyFileCount = runtimes.reduce((total, runtime) => total + (runtime.materialized?.legacyNanobotFileCount ?? 0), 0);
   const groupCount = runtimes.reduce((total, runtime) => total + (runtime.topicGroups?.length ?? 0), 0);
   const topicCount = runtimes.reduce((total, runtime) => total + countTopics(runtime.topicGroups), 0);
 
@@ -429,7 +428,7 @@ export default function MornevenBotManager() {
           icon={<FileText className="h-4 w-4" />}
           label="Translated files"
           value={formatNumber(fileCount)}
-          detail={`${formatNumber(legacyFileCount)} from Nanobot legacy`}
+          detail="Managed ZeroClaw workspace files"
         />
         <MetricCard
           icon={<Database className="h-4 w-4" />}

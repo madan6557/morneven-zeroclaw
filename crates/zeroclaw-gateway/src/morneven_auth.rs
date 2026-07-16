@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use sha2::Sha256;
 use std::{
     env,
+    path::{Component, Path},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -97,6 +98,103 @@ pub fn web_auth_enabled() -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+fn is_truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn production_hardening_enabled<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MORNEVEN_PRODUCTION_HARDENING")
+        .as_deref()
+        .is_some_and(is_truthy)
+        || ["NODE_ENV", "ENVIRONMENT"].iter().any(|key| {
+            lookup(key).is_some_and(|value| value.trim().eq_ignore_ascii_case("production"))
+        })
+        || ["RAILWAY_ENVIRONMENT", "RAILWAY_SERVICE_ID"]
+            .iter()
+            .any(|key| lookup(key).is_some_and(|value| !value.trim().is_empty()))
+}
+
+fn required_value<F>(lookup: &F, key: &str, min_length: usize) -> Result<String, String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let value = lookup(key)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("{key} is not configured"))?;
+    if value.len() < min_length {
+        return Err(format!("{key} must be at least {min_length} characters"));
+    }
+    Ok(value)
+}
+
+fn validate_production_configuration_with<F>(lookup: &F) -> Result<(), String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    if !production_hardening_enabled(lookup) {
+        return Ok(());
+    }
+    if !lookup("MORNEVEN_WEB_AUTH_ENABLED")
+        .as_deref()
+        .is_some_and(is_truthy)
+    {
+        return Err("MORNEVEN_WEB_AUTH_ENABLED must be true in production".to_string());
+    }
+
+    let session_secret = required_value(lookup, "MORNEVEN_WEB_SESSION_SECRET", 32)?;
+    let reload_token = required_value(lookup, "MORNEVEN_RELOAD_TOKEN", 16)?;
+    let sync_token = required_value(lookup, "MORNEVEN_BOT_MANAGER_SYNC_TOKEN", 16)?;
+    if session_secret == reload_token || session_secret == sync_token || reload_token == sync_token
+    {
+        return Err("Morneven production secrets must be distinct".to_string());
+    }
+
+    let backend_url = required_value(lookup, "MORNEVEN_BACKEND_INTERNAL_URL", 1)?;
+    let parsed = reqwest::Url::parse(&backend_url)
+        .map_err(|_| "MORNEVEN_BACKEND_INTERNAL_URL must be a valid URL".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err("MORNEVEN_BACKEND_INTERNAL_URL must use HTTP or HTTPS with a host".to_string());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("MORNEVEN_BACKEND_INTERNAL_URL must not include credentials".to_string());
+    }
+
+    let data_dir = required_value(lookup, "ZEROCLAW_DATA_DIR", 1)?;
+    let runtime_root = required_value(lookup, "MORNEVEN_ZEROCLAW_ROOT", 1)?;
+    let data_path = Path::new(&data_dir);
+    let runtime_path = Path::new(&runtime_root);
+    let unsafe_path = |raw: &str, path: &Path| {
+        !(path.is_absolute() || raw.starts_with('/'))
+            || path
+                .components()
+                .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+    };
+    if unsafe_path(&data_dir, data_path) || unsafe_path(&runtime_root, runtime_path) {
+        return Err("ZeroClaw production data paths must be absolute and normalized".to_string());
+    }
+    if data_dir != "/zeroclaw-data/data" || runtime_root != "/zeroclaw-data/data/morneven" {
+        return Err(
+            "Morneven production data paths must use /zeroclaw-data/data and /zeroclaw-data/data/morneven"
+                .to_string(),
+        );
+    }
+    if runtime_path == data_path || !runtime_path.starts_with(data_path) {
+        return Err("MORNEVEN_ZEROCLAW_ROOT must be inside ZEROCLAW_DATA_DIR".to_string());
+    }
+    Ok(())
+}
+
+pub fn validate_production_configuration() -> Result<(), String> {
+    validate_production_configuration_with(&|key| env::var(key).ok())
 }
 
 fn backend_base_url() -> Result<String, String> {
@@ -374,5 +472,95 @@ pub async fn handle_session(headers: HeaderMap) -> Response {
             }),
         ),
         Err((status, payload)) => (status, payload).into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_production_configuration_with;
+    use std::collections::BTreeMap;
+
+    fn valid_production_environment() -> BTreeMap<String, String> {
+        BTreeMap::from([
+            (
+                "MORNEVEN_PRODUCTION_HARDENING".to_string(),
+                "true".to_string(),
+            ),
+            ("MORNEVEN_WEB_AUTH_ENABLED".to_string(), "true".to_string()),
+            (
+                "MORNEVEN_WEB_SESSION_SECRET".to_string(),
+                "session-secret-with-at-least-32-characters".to_string(),
+            ),
+            (
+                "MORNEVEN_RELOAD_TOKEN".to_string(),
+                "reload-token-unique-1234".to_string(),
+            ),
+            (
+                "MORNEVEN_BOT_MANAGER_SYNC_TOKEN".to_string(),
+                "sync-token-unique-567890".to_string(),
+            ),
+            (
+                "MORNEVEN_BACKEND_INTERNAL_URL".to_string(),
+                "http://backend.railway.internal:8080".to_string(),
+            ),
+            (
+                "ZEROCLAW_DATA_DIR".to_string(),
+                "/zeroclaw-data/data".to_string(),
+            ),
+            (
+                "MORNEVEN_ZEROCLAW_ROOT".to_string(),
+                "/zeroclaw-data/data/morneven".to_string(),
+            ),
+        ])
+    }
+
+    #[test]
+    fn production_configuration_accepts_complete_distinct_secrets() {
+        let values = valid_production_environment();
+        let result = validate_production_configuration_with(&|key| values.get(key).cloned());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn production_configuration_rejects_disabled_web_auth() {
+        let mut values = valid_production_environment();
+        values.insert("MORNEVEN_WEB_AUTH_ENABLED".to_string(), "false".to_string());
+        let result = validate_production_configuration_with(&|key| values.get(key).cloned());
+        assert_eq!(
+            result.unwrap_err(),
+            "MORNEVEN_WEB_AUTH_ENABLED must be true in production"
+        );
+    }
+
+    #[test]
+    fn production_configuration_rejects_shared_tokens() {
+        let mut values = valid_production_environment();
+        values.insert(
+            "MORNEVEN_BOT_MANAGER_SYNC_TOKEN".to_string(),
+            "reload-token-unique-1234".to_string(),
+        );
+        let result = validate_production_configuration_with(&|key| values.get(key).cloned());
+        assert_eq!(
+            result.unwrap_err(),
+            "Morneven production secrets must be distinct"
+        );
+    }
+
+    #[test]
+    fn production_configuration_rejects_the_wrong_mount_path() {
+        let mut values = valid_production_environment();
+        values.insert(
+            "ZEROCLAW_DATA_DIR".to_string(),
+            "/zeroclaw-data/other".to_string(),
+        );
+        values.insert(
+            "MORNEVEN_ZEROCLAW_ROOT".to_string(),
+            "/zeroclaw-data/other/morneven".to_string(),
+        );
+        let result = validate_production_configuration_with(&|key| values.get(key).cloned());
+        assert_eq!(
+            result.unwrap_err(),
+            "Morneven production data paths must use /zeroclaw-data/data and /zeroclaw-data/data/morneven"
+        );
     }
 }

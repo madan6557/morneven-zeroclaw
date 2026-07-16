@@ -178,6 +178,8 @@ COPY --from=web-builder /app/web/dist /usr/share/zeroclawlabs/web/dist
 ENV LANG=C.UTF-8
 ENV ZEROCLAW_DATA_DIR=/zeroclaw-data/data
 ENV MORNEVEN_ZEROCLAW_ROOT=/zeroclaw-data/data/morneven
+ENV MORNEVEN_PRODUCTION_HARDENING=true
+ENV MORNEVEN_WEB_AUTH_ENABLED=true
 ENV HOME=/zeroclaw-data
 ENV ZEROCLAW_gateway__host="[::]"
 # Default provider and model are set in config.toml, not here,
