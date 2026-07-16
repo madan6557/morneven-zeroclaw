@@ -1040,7 +1040,7 @@ impl TelegramChannel {
             return Some((chat_id.to_string(), thread_id.map(ToOwned::to_owned)));
         }
         let topic_id = thread_id
-            .map(|value| Self::morneven_topic_id_text(value))
+            .map(Self::morneven_topic_id_text)
             .unwrap_or_else(|| "main".to_string());
         let state = self.read_morneven_topic_state();
         let Some(lock) = Self::morneven_topic_lock(&state) else {
