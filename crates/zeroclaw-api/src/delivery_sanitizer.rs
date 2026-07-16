@@ -132,7 +132,6 @@ fn strip_reasoning_fences(text: &str) -> String {
         if let Some(fence) = fence {
             let label = trimmed
                 .trim_start_matches(fence)
-                .trim()
                 .split_whitespace()
                 .next()
                 .unwrap_or("")
