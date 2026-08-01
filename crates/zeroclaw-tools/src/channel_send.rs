@@ -91,19 +91,19 @@ impl Tool for ChannelSendTool {
             .and_then(|value| value.as_str())
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'channel' parameter"))?;
+            .ok_or_else(|| anyhow::Error::msg("Missing 'channel' parameter"))?;
         let recipient = args
             .get("to")
             .and_then(|value| value.as_str())
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'to' parameter"))?;
+            .ok_or_else(|| anyhow::Error::msg("Missing 'to' parameter"))?;
         let body = args
             .get("body")
             .and_then(|value| value.as_str())
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'body' parameter"))?;
+            .ok_or_else(|| anyhow::Error::msg("Missing 'body' parameter"))?;
 
         let (resolved_name, channel) = self.resolve_channel(channel_name).ok_or_else(|| {
             let available = self
@@ -113,16 +113,18 @@ impl Tool for ChannelSendTool {
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(", ");
-            anyhow::anyhow!("Channel '{channel_name}' not found. Available: {available}")
+            anyhow::Error::msg(format!(
+                "Channel '{channel_name}' not found. Available: {available}"
+            ))
         })?;
 
         channel
             .send(&SendMessage::new(body, recipient))
             .await
             .map_err(|error| {
-                anyhow::anyhow!(
+                anyhow::Error::msg(format!(
                     "Failed to send message through '{resolved_name}' to '{recipient}': {error}"
-                )
+                ))
             })?;
 
         Ok(ToolResult {
