@@ -2143,13 +2143,20 @@ fn external_pid_is_running(pid: u32) -> io::Result<bool> {
         let stdout = String::from_utf8_lossy(&output.stdout);
         Ok(stdout.contains(&format!(",\"{pid}\",")))
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
     {
-        Ok(Command::new("kill")
-            .arg("-0")
-            .arg(pid.to_string())
-            .status()?
-            .success())
+        if pid == 0 {
+            return Ok(false);
+        }
+        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        if result == 0 {
+            return Ok(true);
+        }
+        match io::Error::last_os_error().raw_os_error() {
+            Some(libc::ESRCH) => Ok(false),
+            Some(libc::EPERM) => Ok(true),
+            _ => Err(io::Error::last_os_error()),
+        }
     }
 }
 
@@ -2202,12 +2209,17 @@ fn stop_external_pid(pid: u32, runtime_dir: &Path) -> io::Result<()> {
         .arg("/T")
         .arg("/F")
         .status()?;
-    #[cfg(not(windows))]
-    let status = Command::new("kill")
-        .arg("-TERM")
-        .arg(pid.to_string())
-        .status()?;
-
+    #[cfg(unix)]
+    {
+        let result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        if result != 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error);
+            }
+        }
+    }
+    #[cfg(windows)]
     if !status.success() && external_pid_is_running(pid)? {
         return Err(io::Error::other(format!("Failed to stop PID {pid}")));
     }
@@ -3690,5 +3702,11 @@ mod tests {
 
         assert!(event["usage"].get("cost").is_none());
         assert_eq!(event["usage"]["cost_usd"], 0.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn morneven_pid_zero_is_not_running() {
+        assert!(!external_pid_is_running(0).unwrap());
     }
 }

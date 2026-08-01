@@ -82,6 +82,9 @@ rcgen = "0.13"
 tempfile = "3.26"
 tokio = { version = "1.50", features = ["rt-multi-thread", "macros"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 default = ["schema-export"]
 plugins-wasm = ["dep:zeroclaw-plugins"]
