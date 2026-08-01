@@ -309,6 +309,12 @@ impl OpenAiCompatibleModelProvider {
         self
     }
 
+    /// Mark this OpenAI-compatible endpoint as accepting image inputs.
+    pub fn with_vision(mut self) -> Self {
+        self.supports_vision = true;
+        self
+    }
+
     /// Merge all system messages into the first user message before sending.
     /// Unlike `new_merge_system_into_user`, this preserves native tool calling.
     pub fn with_merge_system_into_user(mut self) -> Self {

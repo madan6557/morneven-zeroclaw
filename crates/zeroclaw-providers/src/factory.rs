@@ -293,6 +293,15 @@ impl CompatFamilySpec for OpencodeModelProviderConfig {
     const DEFAULT_URL: &'static str = "https://opencode.ai/zen/v1";
     const AUTH: AuthStyle = AuthStyle::Bearer;
     const MODELS_DEV_KEY: Option<&'static str> = Some("opencode");
+
+    fn build_compat(
+        &self,
+        alias: &str,
+        key: Option<&str>,
+        api_url: Option<&str>,
+    ) -> OpenAiCompatibleModelProvider {
+        self.build_compat_base(alias, key, api_url).with_vision()
+    }
 }
 impl CompatFamilySpec for DoubaoModelProviderConfig {
     const DISPLAY: &'static str = "Doubao";
@@ -1265,6 +1274,19 @@ mod tests {
             .create_provider("test", None, None, &ModelProviderRuntimeOptions::default())
             .unwrap();
         assert!(!provider.capabilities().native_tool_calling);
+    }
+
+    #[test]
+    fn opencode_factory_advertises_vision() {
+        let provider = OpencodeModelProviderConfig::default()
+            .create_provider(
+                "default",
+                Some("test-key"),
+                None,
+                &ModelProviderRuntimeOptions::default(),
+            )
+            .unwrap();
+        assert!(provider.capabilities().vision);
     }
 
     #[tokio::test]
