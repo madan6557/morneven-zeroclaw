@@ -74,12 +74,12 @@ pub struct Agent {
     /// Agent alias, retained for opening attribution spans at external turn
     /// call sites (ACP, gateway WS) where the alias is otherwise unavailable.
     agent_alias: String,
-    /// Late-bound channel maps for the four channel-driven tools
-    /// (`ask_user`, `reaction`, `escalate_to_human`, `poll`). Held so that
-    /// per-session callers (e.g. the ACP server) can register a back-channel
-    /// after agent construction. Production paths populate via
-    /// `start_channels`; this is the alternate path for environments that
-    /// build an Agent directly without `start_channels`.
+    /// Late-bound channel maps for the five channel-driven tools
+    /// (`ask_user`, `reaction`, `channel_send`, `escalate_to_human`, `poll`).
+    /// `channel_send` shares the reaction map. Held so per-session callers
+    /// (e.g. the ACP server) can register a back-channel after construction.
+    /// Production paths populate via `start_channels`; this is the alternate
+    /// path for environments that build an Agent directly without it.
     channel_handles: AgentChannelHandles,
     /// When `true`, the agent was constructed without persistent memory.
     /// Memory backend is `NoneMemory`, auto-save is off, and memory tools
@@ -608,7 +608,8 @@ impl Agent {
 
     /// Populate late-bound channel-map handles with configured channels.
     ///
-    /// Seeds `ask_user`, `reaction`, `poll`, and `escalate`
+    /// Seeds `ask_user`, `reaction` (and the shared `channel_send` map), `poll`,
+    /// and `escalate`
     /// handles from the provided map. Called by CLI and orchestrator paths
     /// after agent construction but before the agent loop starts.
     ///

@@ -51,6 +51,7 @@ pub use zeroclaw_tools::browser_open::BrowserOpenTool;
 pub use zeroclaw_tools::calculator::CalculatorTool;
 pub use zeroclaw_tools::canvas::{ALLOWED_CONTENT_TYPES, MAX_CONTENT_SIZE};
 pub use zeroclaw_tools::canvas::{CanvasStore, CanvasTool};
+pub use zeroclaw_tools::channel_send::ChannelSendTool;
 pub use zeroclaw_tools::claude_code::ClaudeCodeTool;
 pub use zeroclaw_tools::claude_code_runner::ClaudeCodeRunnerTool;
 pub use zeroclaw_tools::cli_discovery::{DiscoveredCli, discover_cli_tools};
@@ -1070,6 +1071,13 @@ pub fn all_tools_with_runtime(
     let reaction_tool = ReactionTool::new(security.clone(), Arc::clone(&reaction_handle));
     tool_arcs.push(Arc::new(reaction_tool));
 
+    // Explicit channel-send tool — shares the populated channel map with the
+    // reaction tool so existing channel registration paths wire it automatically.
+    tool_arcs.push(Arc::new(ChannelSendTool::new(
+        security.clone(),
+        Arc::clone(&reaction_handle),
+    )));
+
     // Interactive ask_user tool — always registered; owns its own late-bound channel map.
     let ask_user_handle: Option<PerToolChannelHandle> = Some(Arc::new(RwLock::new(HashMap::new())));
     let ask_user_tool =
@@ -1387,6 +1395,7 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(!names.contains(&"browser_open"));
         assert!(names.contains(&"schedule"));
+        assert!(names.contains(&"channel_send"));
         assert!(names.contains(&"model_routing_config"));
         assert!(names.contains(&"pushover"));
         assert!(names.contains(&"proxy_config"));

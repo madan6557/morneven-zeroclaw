@@ -785,6 +785,7 @@ fn channel_delivery_instructions(channel_name: &str) -> Option<&'static str> {
              - Structure longer answers with bold headers, not raw markdown ## headers\n\
              - For media attachments use markers: [IMAGE:<path-or-url>], [DOCUMENT:<path-or-url>], [VIDEO:<path-or-url>], [AUDIO:<path-or-url>], or [VOICE:<path-or-url>]\n\
              - Keep normal text outside markers and never wrap markers in code fences.\n\
+             - For an explicit outbound Telegram message, use the native `channel_send` tool; for a forum topic set `to` to `chat_id:topic_id` (for example `-1003602779585:6151`).\n\
              - Use tool results silently: answer the latest user message directly, and do not narrate delayed/internal tool execution bookkeeping.",
         ),
         "qq" => Some(
@@ -8672,8 +8673,8 @@ pub async fn start_channels(
                 .expect("channels_by_name initialized on first iteration"),
         );
 
-        // Wire this agent's reaction / ask_user / escalate tool handles
-        // into the shared `channels_by_name` map.
+        // Wire this agent's reaction / channel_send / ask_user / escalate
+        // tool handles into the shared `channels_by_name` map.
         {
             let mut map = reaction_handle_ch.write();
             for (name, ch) in channels_by_name.as_ref() {

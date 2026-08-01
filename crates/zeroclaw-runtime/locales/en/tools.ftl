@@ -13,6 +13,8 @@ tool-browser-delegate = Delegate browser-based tasks to a browser-capable CLI fo
 
 tool-browser-open = Open an approved HTTPS URL in the system browser. Security constraints: allowlist-only domains, no local/private hosts, no scraping.
 
+tool-channel-send = Send an explicit message through a configured channel. For Telegram forum topics, use to="chat_id:topic_id" (for example -1003602779585:6151). Use this native tool instead of running a shell or Python script.
+
 tool-cloud-ops = Cloud transformation advisory tool. Analyzes IaC plans, assesses migration paths, reviews costs, and checks architecture against Well-Architected Framework pillars. Read-only: does not create or modify cloud resources.
 
 tool-cloud-patterns = Cloud pattern library. Given a workload description, suggests applicable cloud-native architectural patterns (containerization, serverless, database modernization, etc.).

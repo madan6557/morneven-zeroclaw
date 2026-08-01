@@ -69,7 +69,7 @@ pub fn register_channel_map_fn(f: ChannelMapFn) {
 /// Returns the number of channels seeded. Parameters match the return order of
 /// `all_tools_with_runtime`:
 ///   ask_user_handle = `Option<PerToolChannelHandle>`
-///   reaction_handle = `PerToolChannelHandle` (NOT Option)
+///   reaction_handle = `PerToolChannelHandle` (NOT Option; also backs `channel_send`)
 ///   poll_handle = `Option<PerToolChannelHandle>`
 ///   escalate_handle = `Option<PerToolChannelHandle>`
 pub(crate) fn seed_channel_handles(
