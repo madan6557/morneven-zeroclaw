@@ -40,11 +40,9 @@ impl ChannelSendTool {
                 .unwrap_or_default(),
         ];
 
-        candidates.into_iter().find_map(|key| {
-            channels
-                .get(&key)
-                .map(|channel| (key, Arc::clone(channel)))
-        })
+        candidates
+            .into_iter()
+            .find_map(|key| channels.get(&key).map(|channel| (key, Arc::clone(channel))))
     }
 }
 
