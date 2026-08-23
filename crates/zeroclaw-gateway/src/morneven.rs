@@ -309,6 +309,7 @@ fn zero_provider_name(provider: &str) -> String {
     match provider.trim().to_ascii_lowercase().as_str() {
         "zhipu" | "bigmodel" => "glm".to_string(),
         "vllm" => "vllm".to_string(),
+        "opencode" => "opencode".to_string(),
         "deepseek" => "deepseek".to_string(),
         "openrouter" => "openrouter".to_string(),
         "openai" => "openai".to_string(),
