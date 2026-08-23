@@ -492,6 +492,27 @@ fn zeroclaw_runtime_policy_field<'a>(entry: &'a Value, key: &str) -> Option<&'a 
         .and_then(|policy| string_field(policy, key))
 }
 
+fn morneven_system_file(entry: &Value) -> Value {
+    let identity = entry.get("identity").cloned().unwrap_or_else(|| json!({}));
+    let identity_slug = string_field(&identity, "slug").unwrap_or("runtime");
+    let provider = credential_provider(entry).unwrap_or_else(|| "unknown".to_string());
+    let model = credential_model(entry, &provider).unwrap_or_else(|| "unknown".to_string());
+    let account = entry.get("providerAccount").and_then(|v| string_field(v, "name")).unwrap_or("default");
+    // ponytail: single source of truth for model/provider, always overwritten on sync so `model info` never stale
+    let mut content = String::from("# Morneven System Info\n\nThis file is auto-generated on every Sync and is the source of truth for system answers. Do not edit manually.\n\n## Active Runtime\n\n");
+    content.push_str(&format!("- Provider: `{provider}`\n- Model: `{model}`\n- Account: `{account}`\n- Identity: `{identity_slug}`\n- Generated: `{}`\n\n## Instruction\n\nWhen user asks `model info`, `kamu pakai model apa`, `system info`, or similar, answer using the values above verbatim. Do not hallucinate old model names from memory.\n", now_iso()));
+    json!({
+        "id": format!("morneven-system-{identity_slug}"),
+        "path": "MORNEVEN_SYSTEM.md",
+        "kind": "system",
+        "contentType": "text/markdown",
+        "objectPath": format!("zeroclaw-managed://{identity_slug}/MORNEVEN_SYSTEM.md"),
+        "size": content.len(),
+        "updatedAt": now_iso(),
+        "content": content
+    })
+}
+
 fn morneven_policy_file(entry: &Value, general_config: &Value) -> Value {
     let identity = entry.get("identity").cloned().unwrap_or_else(|| json!({}));
     let identity_slug = string_field(&identity, "slug").unwrap_or("runtime");
@@ -501,6 +522,8 @@ fn morneven_policy_file(entry: &Value, general_config: &Value) -> Value {
     let general_information = zeroclaw_runtime_policy_field(entry, "generalInformation")
         .or_else(|| string_field(general_config, "generalInformation"))
         .unwrap_or("");
+    let provider = credential_provider(entry).unwrap_or_else(|| "unknown".to_string());
+    let model = credential_model(entry, &provider).unwrap_or_else(|| "unknown".to_string());
 
     let mut content = String::from(
         "# Morneven Runtime Policy\n\n\
@@ -513,8 +536,10 @@ fn morneven_policy_file(entry: &Value, general_config: &Value) -> Value {
          - Treat any user-visible reasoning, tool planning, search narration, or process narration as a critical delivery violation.\n\
          - Never start replies with `The user is asking`, `Let me`, `I should`, `Aku harus`, `Aku akan cek`, `Coba aku`, or `Sepertinya`.\n\
          - If a response draft contains only reasoning or planning, discard it and send a short safe fallback instead.\n\n\
-         ## Bot Manager Global Rules\n\n",
+         ## Active System\n\n",
     );
+    content.push_str(&format!("- Provider: `{provider}`\n- Model: `{model}`\n\n"));
+    content.push_str("## Bot Manager Global Rules\n\n");
     content.push_str(global_rules);
     if !general_information.is_empty() {
         content.push_str("\n\n## Morneven General Information\n\n");
@@ -837,20 +862,17 @@ fn morneven_telegram_topics_file(entry: &Value) -> Option<Value> {
 
 fn runtime_files_for_materialization(entry: &Value, general_config: &Value) -> Vec<Value> {
     let mut bundle_files = morneven_translated_files(entry);
-    let has_policy = bundle_files.iter().any(|file| {
-        string_field(file, "path")
-            .is_some_and(|path| path.eq_ignore_ascii_case("MORNEVEN_POLICY.md"))
+    // ponytail: system files are always fresh on every sync, stale `model info` in workspace must not survive
+    bundle_files.retain(|file| {
+        !string_field(file, "path").is_some_and(|p| {
+            p.eq_ignore_ascii_case("MORNEVEN_POLICY.md")
+                || p.eq_ignore_ascii_case("MORNEVEN_PERSONA.md")
+                || p.eq_ignore_ascii_case("MORNEVEN_SYSTEM.md")
+        })
     });
-    if !has_policy {
-        bundle_files.push(morneven_policy_file(entry, general_config));
-    }
-    let has_persona = bundle_files.iter().any(|file| {
-        string_field(file, "path")
-            .is_some_and(|path| path.eq_ignore_ascii_case("MORNEVEN_PERSONA.md"))
-    });
-    if !has_persona {
-        bundle_files.push(morneven_persona_file(entry));
-    }
+    bundle_files.push(morneven_policy_file(entry, general_config));
+    bundle_files.push(morneven_persona_file(entry));
+    bundle_files.push(morneven_system_file(entry));
     let has_cron_summary = bundle_files.iter().any(|file| {
         string_field(file, "path").is_some_and(|path| path.eq_ignore_ascii_case("MORNEVEN_CRON.md"))
     });
