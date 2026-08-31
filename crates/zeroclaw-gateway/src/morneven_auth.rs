@@ -1,0 +1,566 @@
+use axum::{
+    Json,
+    http::{HeaderMap, StatusCode, header},
+    response::{IntoResponse, Response},
+};
+use hmac::{Hmac, Mac};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::Sha256;
+use std::{
+    env,
+    path::{Component, Path},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+type HmacSha256 = Hmac<Sha256>;
+
+const SESSION_PREFIX: &str = "mv1";
+const DEFAULT_SESSION_TTL_SECONDS: i64 = 4 * 60 * 60;
+
+#[derive(Debug, Deserialize)]
+pub struct MornevenLoginRequest {
+    pub email: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MornevenWebUser {
+    pub id: String,
+    pub username: String,
+    pub role: String,
+    pub level: i64,
+    pub track: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MornevenSessionClaims {
+    sub: String,
+    username: String,
+    role: String,
+    level: i64,
+    track: String,
+    iat: i64,
+    exp: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct BackendEnvelope<T> {
+    success: bool,
+    message: Option<String>,
+    #[serde(rename = "errorCode")]
+    error_code: Option<String>,
+    data: Option<T>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BackendLoginData {
+    token: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BackendAccessData {
+    #[serde(rename = "canAccessBotManager")]
+    can_access_bot_manager: bool,
+    user: MornevenWebUser,
+}
+
+fn response(status: StatusCode, payload: Value) -> Response {
+    (status, Json(payload)).into_response()
+}
+
+fn error_response(status: StatusCode, message: impl Into<String>) -> Response {
+    response(
+        status,
+        json!({
+            "ok": false,
+            "error": message.into()
+        }),
+    )
+}
+
+fn auth_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<Value>) {
+    (
+        status,
+        Json(json!({
+            "error": message.into()
+        })),
+    )
+}
+
+pub fn web_auth_enabled() -> bool {
+    env::var("MORNEVEN_WEB_AUTH_ENABLED")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn is_truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn production_hardening_enabled<F>(lookup: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("MORNEVEN_PRODUCTION_HARDENING")
+        .as_deref()
+        .is_some_and(is_truthy)
+        || ["NODE_ENV", "ENVIRONMENT"].iter().any(|key| {
+            lookup(key).is_some_and(|value| value.trim().eq_ignore_ascii_case("production"))
+        })
+        || ["RAILWAY_ENVIRONMENT", "RAILWAY_SERVICE_ID"]
+            .iter()
+            .any(|key| lookup(key).is_some_and(|value| !value.trim().is_empty()))
+}
+
+fn required_value<F>(lookup: &F, key: &str, min_length: usize) -> Result<String, String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let value = lookup(key)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("{key} is not configured"))?;
+    if value.len() < min_length {
+        return Err(format!("{key} must be at least {min_length} characters"));
+    }
+    Ok(value)
+}
+
+fn validate_production_configuration_with<F>(lookup: &F) -> Result<(), String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    if !production_hardening_enabled(lookup) {
+        return Ok(());
+    }
+    if !lookup("MORNEVEN_WEB_AUTH_ENABLED")
+        .as_deref()
+        .is_some_and(is_truthy)
+    {
+        return Err("MORNEVEN_WEB_AUTH_ENABLED must be true in production".to_string());
+    }
+
+    let session_secret = required_value(lookup, "MORNEVEN_WEB_SESSION_SECRET", 32)?;
+    let reload_token = required_value(lookup, "MORNEVEN_RELOAD_TOKEN", 16)?;
+    let sync_token = required_value(lookup, "MORNEVEN_BOT_MANAGER_SYNC_TOKEN", 16)?;
+    if session_secret == reload_token || session_secret == sync_token || reload_token == sync_token
+    {
+        return Err("Morneven production secrets must be distinct".to_string());
+    }
+
+    let backend_url = required_value(lookup, "MORNEVEN_BACKEND_INTERNAL_URL", 1)?;
+    let parsed = reqwest::Url::parse(&backend_url)
+        .map_err(|_| "MORNEVEN_BACKEND_INTERNAL_URL must be a valid URL".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err("MORNEVEN_BACKEND_INTERNAL_URL must use HTTP or HTTPS with a host".to_string());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("MORNEVEN_BACKEND_INTERNAL_URL must not include credentials".to_string());
+    }
+
+    let data_dir = required_value(lookup, "ZEROCLAW_DATA_DIR", 1)?;
+    let runtime_root = required_value(lookup, "MORNEVEN_ZEROCLAW_ROOT", 1)?;
+    let data_path = Path::new(&data_dir);
+    let runtime_path = Path::new(&runtime_root);
+    let unsafe_path = |raw: &str, path: &Path| {
+        !(path.is_absolute() || raw.starts_with('/'))
+            || path
+                .components()
+                .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+    };
+    if unsafe_path(&data_dir, data_path) || unsafe_path(&runtime_root, runtime_path) {
+        return Err("ZeroClaw production data paths must be absolute and normalized".to_string());
+    }
+    if data_dir != "/zeroclaw-data/data" || runtime_root != "/zeroclaw-data/data/morneven" {
+        return Err(
+            "Morneven production data paths must use /zeroclaw-data/data and /zeroclaw-data/data/morneven"
+                .to_string(),
+        );
+    }
+    if runtime_path == data_path || !runtime_path.starts_with(data_path) {
+        return Err("MORNEVEN_ZEROCLAW_ROOT must be inside ZEROCLAW_DATA_DIR".to_string());
+    }
+    Ok(())
+}
+
+pub fn validate_production_configuration() -> Result<(), String> {
+    validate_production_configuration_with(&|key| env::var(key).ok())
+}
+
+fn backend_base_url() -> Result<String, String> {
+    let raw = env::var("MORNEVEN_BACKEND_INTERNAL_URL")
+        .map_err(|_| "MORNEVEN_BACKEND_INTERNAL_URL is not configured".to_string())?;
+    let trimmed = raw.trim().trim_end_matches('/').to_string();
+    if trimmed.is_empty() {
+        return Err("MORNEVEN_BACKEND_INTERNAL_URL is empty".to_string());
+    }
+    Ok(trimmed)
+}
+
+fn backend_url(path: &str) -> Result<String, String> {
+    let base = backend_base_url()?;
+    let path = path.trim_start_matches('/');
+    if base.ends_with("/api") && path.starts_with("api/") {
+        Ok(format!("{}/{}", base, path.trim_start_matches("api/")))
+    } else if base.ends_with("/v1") && path.starts_with("v1/") {
+        Ok(format!("{}/{}", base, path.trim_start_matches("v1/")))
+    } else {
+        Ok(format!("{}/{}", base, path))
+    }
+}
+
+fn session_secret() -> Result<String, String> {
+    let secret = env::var("MORNEVEN_WEB_SESSION_SECRET")
+        .map_err(|_| "MORNEVEN_WEB_SESSION_SECRET is not configured".to_string())?;
+    if secret.trim().len() < 32 {
+        return Err("MORNEVEN_WEB_SESSION_SECRET must be at least 32 characters".to_string());
+    }
+    Ok(secret)
+}
+
+fn session_ttl_seconds() -> i64 {
+    env::var("MORNEVEN_WEB_SESSION_TTL_SECONDS")
+        .ok()
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_SESSION_TTL_SECONDS)
+}
+
+fn now_unix_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| Duration::from_secs(0))
+        .as_secs() as i64
+}
+
+fn sign_payload(payload: &str) -> Result<String, String> {
+    let secret = session_secret()?;
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+        .map_err(|_| "Invalid session secret".to_string())?;
+    mac.update(payload.as_bytes());
+    Ok(hex::encode(mac.finalize().into_bytes()))
+}
+
+fn issue_session_token(user: &MornevenWebUser) -> Result<(String, String), String> {
+    let issued_at = now_unix_seconds();
+    let expires_at = issued_at + session_ttl_seconds();
+    let claims = MornevenSessionClaims {
+        sub: user.id.clone(),
+        username: user.username.clone(),
+        role: user.role.clone(),
+        level: user.level,
+        track: user.track.clone(),
+        iat: issued_at,
+        exp: expires_at,
+    };
+    let payload_json = serde_json::to_vec(&claims).map_err(|error| error.to_string())?;
+    let payload = hex::encode(payload_json);
+    let signature = sign_payload(&payload)?;
+    let expires_at_iso = chrono::DateTime::<chrono::Utc>::from_timestamp(expires_at, 0)
+        .map(|value| value.to_rfc3339())
+        .unwrap_or_default();
+    Ok((
+        format!("{SESSION_PREFIX}.{payload}.{signature}"),
+        expires_at_iso,
+    ))
+}
+
+pub fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|auth| auth.strip_prefix("Bearer "))
+        .filter(|token| !token.trim().is_empty())
+}
+
+pub fn validate_session_token(token: &str) -> Result<MornevenWebUser, String> {
+    let mut parts = token.split('.');
+    let prefix = parts.next().unwrap_or_default();
+    let payload = parts.next().unwrap_or_default();
+    let signature = parts.next().unwrap_or_default();
+    if prefix != SESSION_PREFIX
+        || payload.is_empty()
+        || signature.is_empty()
+        || parts.next().is_some()
+    {
+        return Err("Invalid Morneven session token".to_string());
+    }
+
+    let provided =
+        hex::decode(signature).map_err(|_| "Invalid Morneven session signature".to_string())?;
+    let mut mac = HmacSha256::new_from_slice(session_secret()?.as_bytes())
+        .map_err(|_| "Invalid session secret".to_string())?;
+    mac.update(payload.as_bytes());
+    mac.verify_slice(&provided)
+        .map_err(|_| "Invalid Morneven session signature".to_string())?;
+
+    let payload_bytes =
+        hex::decode(payload).map_err(|_| "Invalid Morneven session payload".to_string())?;
+    let claims: MornevenSessionClaims = serde_json::from_slice(&payload_bytes)
+        .map_err(|_| "Invalid Morneven session payload".to_string())?;
+    if claims.exp <= now_unix_seconds() {
+        return Err("Morneven session expired".to_string());
+    }
+    Ok(MornevenWebUser {
+        id: claims.sub,
+        username: claims.username,
+        role: claims.role,
+        level: claims.level,
+        track: claims.track,
+    })
+}
+
+pub fn require_web_session(
+    headers: &HeaderMap,
+) -> Result<MornevenWebUser, (StatusCode, Json<Value>)> {
+    let token = extract_bearer_token(headers)
+        .ok_or_else(|| auth_error(StatusCode::UNAUTHORIZED, "Missing Morneven session"))?;
+    validate_session_token(token).map_err(|error| auth_error(StatusCode::UNAUTHORIZED, error))
+}
+
+pub async fn handle_login(Json(body): Json<MornevenLoginRequest>) -> Response {
+    if !web_auth_enabled() {
+        return error_response(StatusCode::NOT_FOUND, "Morneven WebUI auth is not enabled");
+    }
+
+    let login_url = match backend_url("/api/auth/login") {
+        Ok(value) => value,
+        Err(error) => return error_response(StatusCode::SERVICE_UNAVAILABLE, error),
+    };
+    let access_url = match backend_url("/api/bot-manager/access") {
+        Ok(value) => value,
+        Err(error) => return error_response(StatusCode::SERVICE_UNAVAILABLE, error),
+    };
+
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(12))
+        .build()
+    {
+        Ok(value) => value,
+        Err(error) => return error_response(StatusCode::BAD_GATEWAY, error.to_string()),
+    };
+
+    let login_response = match client
+        .post(login_url)
+        .json(&json!({
+            "email": body.email,
+            "password": body.password
+        }))
+        .send()
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                format!("Morneven login request failed: {error}"),
+            );
+        }
+    };
+    let login_status = login_response.status();
+    let login_payload = match login_response
+        .json::<BackendEnvelope<BackendLoginData>>()
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                format!("Invalid Morneven login response: {error}"),
+            );
+        }
+    };
+    if !login_status.is_success() || !login_payload.success {
+        return error_response(
+            StatusCode::from_u16(login_status.as_u16()).unwrap_or(StatusCode::UNAUTHORIZED),
+            login_payload
+                .message
+                .or(login_payload.error_code)
+                .unwrap_or_else(|| "Morneven login failed".to_string()),
+        );
+    }
+    let Some(login_data) = login_payload.data else {
+        return error_response(
+            StatusCode::BAD_GATEWAY,
+            "Morneven login response did not include a token",
+        );
+    };
+
+    let access_response = match client
+        .get(access_url)
+        .bearer_auth(&login_data.token)
+        .send()
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                format!("Morneven access check failed: {error}"),
+            );
+        }
+    };
+    let access_status = access_response.status();
+    let access_payload = match access_response
+        .json::<BackendEnvelope<BackendAccessData>>()
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                format!("Invalid Morneven access response: {error}"),
+            );
+        }
+    };
+    if !access_status.is_success() || !access_payload.success {
+        return error_response(
+            StatusCode::from_u16(access_status.as_u16()).unwrap_or(StatusCode::FORBIDDEN),
+            access_payload
+                .message
+                .or(access_payload.error_code)
+                .unwrap_or_else(|| "Bot Manager access denied".to_string()),
+        );
+    }
+    let Some(access_data) = access_payload.data else {
+        return error_response(
+            StatusCode::BAD_GATEWAY,
+            "Morneven access response was empty",
+        );
+    };
+    if !access_data.can_access_bot_manager {
+        return error_response(StatusCode::FORBIDDEN, "Bot Manager access denied");
+    }
+    let (token, expires_at) = match issue_session_token(&access_data.user) {
+        Ok(value) => value,
+        Err(error) => return error_response(StatusCode::SERVICE_UNAVAILABLE, error),
+    };
+
+    response(
+        StatusCode::OK,
+        json!({
+            "ok": true,
+            "authMode": "morneven",
+            "token": token,
+            "expiresAt": expires_at,
+            "user": access_data.user
+        }),
+    )
+}
+
+pub async fn handle_session(headers: HeaderMap) -> Response {
+    if !web_auth_enabled() {
+        return error_response(StatusCode::NOT_FOUND, "Morneven WebUI auth is not enabled");
+    }
+    match require_web_session(&headers) {
+        Ok(user) => response(
+            StatusCode::OK,
+            json!({
+                "ok": true,
+                "authMode": "morneven",
+                "user": user
+            }),
+        ),
+        Err((status, payload)) => (status, payload).into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_production_configuration_with;
+    use std::collections::BTreeMap;
+
+    fn valid_production_environment() -> BTreeMap<String, String> {
+        BTreeMap::from([
+            (
+                "MORNEVEN_PRODUCTION_HARDENING".to_string(),
+                "true".to_string(),
+            ),
+            ("MORNEVEN_WEB_AUTH_ENABLED".to_string(), "true".to_string()),
+            (
+                "MORNEVEN_WEB_SESSION_SECRET".to_string(),
+                "session-secret-with-at-least-32-characters".to_string(),
+            ),
+            (
+                "MORNEVEN_RELOAD_TOKEN".to_string(),
+                "reload-token-unique-1234".to_string(),
+            ),
+            (
+                "MORNEVEN_BOT_MANAGER_SYNC_TOKEN".to_string(),
+                "sync-token-unique-567890".to_string(),
+            ),
+            (
+                "MORNEVEN_BACKEND_INTERNAL_URL".to_string(),
+                "http://backend.railway.internal:8080".to_string(),
+            ),
+            (
+                "ZEROCLAW_DATA_DIR".to_string(),
+                "/zeroclaw-data/data".to_string(),
+            ),
+            (
+                "MORNEVEN_ZEROCLAW_ROOT".to_string(),
+                "/zeroclaw-data/data/morneven".to_string(),
+            ),
+        ])
+    }
+
+    #[test]
+    fn production_configuration_accepts_complete_distinct_secrets() {
+        let values = valid_production_environment();
+        let result = validate_production_configuration_with(&|key| values.get(key).cloned());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn production_configuration_rejects_disabled_web_auth() {
+        let mut values = valid_production_environment();
+        values.insert("MORNEVEN_WEB_AUTH_ENABLED".to_string(), "false".to_string());
+        let result = validate_production_configuration_with(&|key| values.get(key).cloned());
+        assert_eq!(
+            result.unwrap_err(),
+            "MORNEVEN_WEB_AUTH_ENABLED must be true in production"
+        );
+    }
+
+    #[test]
+    fn production_configuration_rejects_shared_tokens() {
+        let mut values = valid_production_environment();
+        values.insert(
+            "MORNEVEN_BOT_MANAGER_SYNC_TOKEN".to_string(),
+            "reload-token-unique-1234".to_string(),
+        );
+        let result = validate_production_configuration_with(&|key| values.get(key).cloned());
+        assert_eq!(
+            result.unwrap_err(),
+            "Morneven production secrets must be distinct"
+        );
+    }
+
+    #[test]
+    fn production_configuration_rejects_the_wrong_mount_path() {
+        let mut values = valid_production_environment();
+        values.insert(
+            "ZEROCLAW_DATA_DIR".to_string(),
+            "/zeroclaw-data/other".to_string(),
+        );
+        values.insert(
+            "MORNEVEN_ZEROCLAW_ROOT".to_string(),
+            "/zeroclaw-data/other/morneven".to_string(),
+        );
+        let result = validate_production_configuration_with(&|key| values.get(key).cloned());
+        assert_eq!(
+            result.unwrap_err(),
+            "Morneven production data paths must use /zeroclaw-data/data and /zeroclaw-data/data/morneven"
+        );
+    }
+}
